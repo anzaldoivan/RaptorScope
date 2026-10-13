@@ -1,0 +1,98 @@
+# Builds RaptorScope on every push and pull request, and publishes a release zip for v* tags.
+# Fork-only: this file is not part of the changes proposed upstream.
+name: build
+
+on:
+  push:
+    branches: [dinorand]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows x64 (MSVC)
+    runs-on: windows-2022
+    permissions:
+      contents: write   # create the GitHub release for a tag
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: microsoft/setup-msbuild@v2
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build the viewer
+        run: msbuild projects\vs2022\DC_Archive_Tool.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v143 /t:Rebuild /m /nologo /v:minimal
+
+      - name: Build the command-line exporter
+        shell: cmd
+        run: |
+          mkdir stage
+          cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I include tools\dc1_export.cpp src\formats\dat.cpp src\formats\mesh.cpp src\core\lzss.cpp /Fe:stage\dc1_export.exe /Fo:stage\
+
+      - name: Smoke test the exporter
+        shell: pwsh
+        run: |
+          & stage\dc1_export.exe
+          if ($LASTEXITCODE -ne 2) { throw "dc1_export with no arguments should exit 2, got $LASTEXITCODE" }
+          exit 0
+
+      - name: Stage the release files
+        shell: pwsh
+        run: |
+          Copy-Item bin\Release_x64\DC_Archive_Tool.exe stage\RaptorScope-DC1-GLB.exe
+          Copy-Item README.md, EXPORTING.md, LICENSE stage\
+          Remove-Item stage\*.obj -ErrorAction SilentlyContinue
+          $last = git describe --tags --abbrev=0 "HEAD^" 2>$null
+          $range = if ($last) { "$last..HEAD" } else { "HEAD~20..HEAD" }
+          $notes = @("# RaptorScope DC1 GLB: $(Get-Date -Format yyyy-MM-dd) build", "",
+                     "Automated build of the dinorand fork. Commits since $($last ?? 'the last 20'):", "")
+          $notes += git log --format="- %s" $range
+          $notes += @("", "Built from $(git rev-parse --short HEAD) on $env:GITHUB_REF_NAME.")
+          $notes | Set-Content stage\RELEASE_NOTES.md -Encoding utf8
+          Compress-Archive -Path stage\* -DestinationPath RaptorScope-DC1-GLB-win64.zip -Force
+          Get-ChildItem stage | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RaptorScope-DC1-GLB-win64
+          path: stage/
+          if-no-files-found: error
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" RaptorScope-DC1-GLB-win64.zip --title "${{ github.ref_name }}" --notes-file stage/RELEASE_NOTES.md
+
+  mingw:
+    name: Windows x64 (MinGW, build-windows.cmd)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with the documented MinGW script
+        shell: cmd
+        run: call build-windows.cmd
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RaptorScope-mingw
+          path: bin/Release/*.exe
+          if-no-files-found: error
+
+  linux:
+    name: Linux (formats layer)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the exporter and compile the formats layer
+        run: |
+          g++ -std=c++11 -O2 -Wall -Iinclude tools/dc1_export.cpp src/formats/dat.cpp src/formats/mesh.cpp src/core/lzss.cpp -o dc1_export
+          g++ -std=c++11 -fsyntax-only -Iinclude -D_snprintf=snprintf src/formats/scd.cpp src/formats/save_editor.cpp src/formats/texture.cpp src/formats/tim.cpp src/core/color.cpp
+          rc=0; ./dc1_export || rc=$?; test "$rc" -eq 2
