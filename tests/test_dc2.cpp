@@ -10,6 +10,7 @@
 #include "formats/dc2.h"
 #include "formats/texture.h"
 #include "core/lzss.h"
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -1061,6 +1062,211 @@ static void test_image_panel()
     free(uses);
 }
 
+/*─── Cameras, camera zones, sound zones ─────────────────────────*/
+
+static void test_cameras()
+{
+    /* Slot 9: 16-byte header, 16-byte records, then bytes nobody reads */
+    static const s16 cam0[8] = { 390, -2609, -3470, 230, -1984, 1750, 5929, 0 };   /* ST101 camera 0 */
+    static const s16 cam1[8] = { 0, -1000, 0, 320, 0, -1000, 1000, 1024 };
+    Buffer s9;
+    add32(s9, 12345); add16(s9, 2); add16(s9, 0x1ADA); add32(s9, 0); add32(s9, 0);
+    for (int i = 0; i < 8; i++) add16(s9, (u16)cam0[i]);
+    for (int i = 0; i < 8; i++) add16(s9, (u16)cam1[i]);
+    add32(s9, 0xDEADBEEF);
+    /* Slot 10: {sector, bytes} per camera */
+    Buffer s10;
+    add32(s10, 0); add32(s10, 83968); add32(s10, 41); add32(s10, 6144);
+    /* Slot 3: u32 count, 44-byte records.  The second zone names camera 0
+       again, one floor up; the third names a camera past the table. */
+    Buffer s3;
+    add32(s3, 3);
+    s3.resize(4 + 3 * 44);
+    static const s16 quad[8] = { -2900, 2400, 2700, 3800, 1400, -100, -3600, -1900 };
+    for (int z = 0; z < 3; z++) {
+        size_t o = 4 + z * 44;
+        s3.data[o] = z == 1 ? 0x81 : 1;
+        s3.data[o + 4] = z == 2 ? 9 : 0;
+        s3.data[o + 5] = 7; s3.data[o + 6] = (u8)z; s3.data[o + 7] = 2;
+        put16(s3, o + 8, (u16)-10000); put16(s3, o + 10, 10000);
+        for (int i = 0; i < 8; i++) { put16(s3, o + 12 + i * 2, (u16)(quad[i] + z)); put16(s3, o + 28 + i * 2, (u16)(quad[i] * 2)); }
+    }
+    /* Slot 6: u32 count, 20-byte records */
+    Buffer s6;
+    add32(s6, 1);
+    s6.push(3); s6.push(1); s6.push((u8)-2); s6.push(9);
+    for (int i = 0; i < 8; i++) add16(s6, (u16)(100 * i - 300));
+
+    const Buffer* sec[11] = { 0, 0, 0, &s3, 0, 0, &s6, 0, 0, &s9, &s10 };
+    Buffer blob;
+    make_room_blob(blob, sec);
+    Dc2RoomDir dir;
+    CHECK(dc2_room_directory(blob.data, blob.size, BASE, dir));
+
+    Dc2Camera c[4];
+    CHECK(dc2_room_cameras(blob.data, blob.size, dir, c, 4) == 2);
+    CHECK(c[0].eye[0] == 390 && c[0].eye[1] == -2609 && c[0].eye[2] == -3470 && c[0].proj == 230);
+    CHECK(c[0].target[0] == -1984 && c[0].target[1] == 1750 && c[0].target[2] == 5929 && c[0].roll == 0);
+    CHECK(c[0].dbs_off == 0 && c[0].dbs_size == 83968);
+    CHECK(c[1].roll == 1024 && c[1].dbs_off == 41 * DAT_SECTOR && c[1].dbs_size == 6144);
+    CHECK(dc2_room_cameras(blob.data, blob.size, dir, c, 1) == 1);
+    /* Without the 0x1ADA word the slot is not a camera table */
+    blob.data[dir.off[9] + 6] ^= 1;
+    CHECK(dc2_room_cameras(blob.data, blob.size, dir, c, 4) == 0);
+    blob.data[dir.off[9] + 6] ^= 1;
+    CHECK(dc2_room_cameras(blob.data, blob.size, dir, c, 4) == 2);
+
+    Dc2CamZone z[4];
+    CHECK(dc2_room_cam_zones(blob.data, blob.size, dir, z, 4) == 3);
+    CHECK(z[0].flags == 1 && z[0].camera == 0 && z[0].b5 == 7 && z[0].floor == 0 && z[0].span == 2);
+    CHECK(z[0].w8[0] == -10000 && z[0].w8[1] == 10000);
+    CHECK(z[0].x[0] == -2900 && z[0].z[0] == 2400 && z[0].x[3] == -3600 && z[0].z[3] == -1900);
+    CHECK(z[0].vx[1] == 5400 && z[0].vz[2] == -200);
+    CHECK(z[1].flags == 0x81 && z[1].floor == 1 && z[2].camera == 9);
+
+    Dc2SoundZone sz[2];
+    CHECK(dc2_room_sound_zones(blob.data, blob.size, dir, sz, 2) == 1);
+    CHECK(sz[0].b0 == 3 && sz[0].on == 1 && sz[0].floor == -2 && sz[0].b3 == 9);
+    CHECK(sz[0].x[0] == -300 && sz[0].z[0] == -200 && sz[0].x[3] == 300 && sz[0].z[3] == 400);
+
+    /* A count that runs past the section stops at the last whole record */
+    put32(blob, dir.off[3], 1000);
+    CHECK(dc2_room_cam_zones(blob.data, blob.size, dir, z, 4) == 3);
+    put32(blob, dir.off[3], 3);
+
+    /* Projection.  A point on the line from eye to target is the screen
+       centre; one to the camera's right is right of it, one below is lower. */
+    f32 s[2];
+    f32 mid[3] = { (390 - 1984) * 0.5f, (-2609 + 1750) * 0.5f, (-3470 + 5929) * 0.5f };
+    CHECK(dc2_camera_project(c[0], mid, s) && fabsf(s[0] - 160) < 0.01f && fabsf(s[1] - 120) < 0.01f);
+    f32 tgt[3] = { -1984, 1750, 5929 };
+    CHECK(dc2_camera_project(c[0], tgt, s) && fabsf(s[0] - 160) < 0.01f && fabsf(s[1] - 120) < 0.01f);
+    f32 behind[3] = { 390 + 2374, -2609 - 4359, -3470 - 9399 };
+    CHECK(!dc2_camera_project(c[0], behind, s));
+    /* A camera looking along +z from (0, -1000, 0), distance 320: 100 to
+       the +x side at depth 1000 is 32 pixels right, 100 down is 32 lower */
+    Dc2Camera flat = c[1];
+    flat.roll = 0;
+    f32 px[3] = { 100, -1000, 1000 }, py[3] = { 0, -900, 1000 };
+    CHECK(dc2_camera_project(flat, px, s) && fabsf(s[0] - 192) < 0.01f && fabsf(s[1] - 120) < 0.01f);
+    CHECK(dc2_camera_project(flat, py, s) && fabsf(s[0] - 160) < 0.01f && fabsf(s[1] - 152) < 0.01f);
+    /* Roll of a quarter turn (1024) turns the picture about its centre */
+    CHECK(dc2_camera_project(c[1], px, s) && fabsf(s[0] - 160) < 0.01f && fabsf(fabsf(s[1] - 120) - 32) < 0.01f);
+
+    /* Overlay: one thread per zone whose camera exists, in zone order,
+       then one for camera 1, which no zone names */
+    RdtSceneOverlay* ov = new RdtSceneOverlay();
+    CHECK(dc2_room_overlay(blob.data, blob.size, BASE, *ov));
+    CHECK(ov->n_cam_threads == 3);
+    const RdtSceneOverlay::CamThread* t = ov->cam_threads;
+    CHECK(t[0].cam_id == 0 && t[0].floor == 0 && t[0].floor_span == 2 && !t[0].no_zone && t[0].zflags == 1);
+    CHECK(t[1].cam_id == 0 && t[1].floor == 1 && t[1].zflags == 0x81 && t[1].x[0] == -2899);
+    CHECK(t[2].cam_id == 1 && t[2].no_zone && t[2].roll == 1024 && t[2].dbs_off == 41 * DAT_SECTOR);
+    CHECK(t[0].proj == 230 && t[0].dbs_size == 83968);
+    /* The descriptor is a DC1 fixed shot, so the viewer's shot code reads it */
+    f32 player[3] = { 0, 0, 0 }, eye[3], tg[3];
+    CHECK(rdt_camera_shot(t[0].desc, player, eye, tg) == RDT_SHOT_FIXED);
+    CHECK(eye[0] == 390 && eye[1] == -2609 && eye[2] == -3470 && tg[0] == -1984 && tg[1] == 1750 && tg[2] == 5929);
+    /* The sound zone is listed with the floor zones */
+    CHECK(ov->n_zones == 1 && ov->zones[0].kind == RDT_ZONE_SOUND && ov->zones[0].collision_group == (u8)-2);
+    delete ov;
+}
+
+/*─── ST*.DBS backgrounds ────────────────────────────────────────*/
+
+static void test_backgrounds()
+{
+    /* A JFIF as far as the frame header: SOI, APP0, SOF0 240 x 320 */
+    static const u8 jpeg[] = { 0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x04, 'J', 'F',
+                               0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0xF0, 0x01, 0x40, 0x03, 0x01, 0x22, 0x00 };
+    int w = 0, h = 0;
+    CHECK(dc2_jpeg_size(jpeg, sizeof(jpeg), w, h) && w == 320 && h == 240);
+    CHECK(!dc2_jpeg_size(jpeg + 1, sizeof(jpeg) - 1, w, h));
+
+    /* Mask table: two tiles.  Only the low nibble of the y byte counts. */
+    Buffer table;
+    add32(table, 2);
+    table.push(3); table.push(0x25); add16(table, (u16)-40);
+    table.push(19); table.push(14); add16(table, 7);
+    Dc2MaskTile tiles[4];
+    CHECK(dc2_mask_tiles(table.data, table.size, tiles, 4) == 2);
+    CHECK(tiles[0].x == 48 && tiles[0].y == 80 && tiles[0].depth == -40);
+    CHECK(tiles[1].x == 304 && tiles[1].y == 224 && tiles[1].depth == 7);
+    CHECK(dc2_mask_tiles(table.data, table.size - 1, tiles, 4) == 1);
+
+    /* Cells: 18 x 18 per tile.  Tile 0 is red where opaque, with a border
+       of white that must not be drawn; its pixel (2, 1) is transparent. */
+    Buffer cells;
+    for (int t = 0; t < 2; t++)
+        for (int y = 0; y < 18; y++)
+            for (int x = 0; x < 18; x++) {
+                bool border = x == 0 || y == 0 || x == 17 || y == 17;
+                u16 c = border ? 0xFFFF : t == 0 ? (0x8000 | 31) : (0x8000 | (31 << 5));
+                if (t == 0 && x == 3 && y == 2) c = 31 << 10;      /* blue, bit 15 clear */
+                add16(cells, c);
+            }
+    Buffer lz;
+    CHECK(lzss_compress(cells.data, cells.size, lz));
+
+    static const u8 pal[512] = { 0 };
+    PkgEntry masked[] = { { 0, table.data, (u32)table.size, 0x9500, 0x6B, 0, 0 },
+                          { 0, jpeg, sizeof(jpeg), 0x1500, 0x6C, 0, 0 },
+                          { 2, pal, 512, 0, 496, 256, 1 },
+                          { 0, lz.data, (u32)lz.size, (u16)cells.size, 0, 0, 0 } };
+    Buffer none;
+    add32(none, 0);
+    PkgEntry plain[] = { { 0, none.data, 4, 0x9500, 0x6B, 0, 0 }, { 0, jpeg, sizeof(jpeg), 0x1500, 0x6C, 0, 0 } };
+    PkgEntry pict[] = { plain[0], plain[1], masked[2], { 8, lz.data, (u32)lz.size, 320, 0, 128, 32 } };
+    Buffer p0, p1, p2, dbs;
+    make_package(p0, masked, 4, true);
+    make_package(p1, plain, 2, true);
+    make_package(p2, pict, 4, true);
+    dbs.append(p0.data, p0.size); dbs.append(p1.data, p1.size); dbs.append(p2.data, p2.size);
+
+    DatArchive ar;
+    CHECK(dat_parse_memory(dbs.data, dbs.size, ar));
+    CHECK(ar.n_packages == 3 && ar.count == 10);
+    size_t n = 0;
+    u8* built = dat_build(ar.entries, ar.count, n, true);
+    CHECK(built && n == dbs.size && memcmp(built, dbs.data, n) == 0);
+    free(built);
+
+    Dc2Background bg;
+    CHECK(dc2_background(ar, 0, bg) && bg.first == 0 && bg.kind == DC2_BG_MASKED && bg.n_tiles == 2);
+    CHECK(bg.offset == 0 && bg.w == 320 && bg.h == 240);
+    CHECK(dc2_background(ar, 1, bg) && bg.first == 4 && bg.kind == DC2_BG_PLAIN && bg.n_tiles == 0 && bg.offset == p0.size);
+    CHECK(dc2_background(ar, 2, bg) && bg.first == 6 && bg.kind == DC2_BG_PICTURE && bg.offset == p0.size + p1.size);
+    CHECK(!dc2_background(ar, 3, bg));
+    CHECK(dc2_background_at(ar, 0) == 0 && dc2_background_at(ar, (u32)p0.size) == 1);
+    CHECK(dc2_background_at(ar, (u32)(p0.size + p1.size)) == 2);
+    CHECK(dc2_background_at(ar, DAT_SECTOR) == -1);      /* an entry, not a package */
+    /* An ordinary package is not a background */
+    { DatArchive o; PkgEntry e[] = { { 2, pal, 512, 0, 496, 256, 1 }, { 0, jpeg, sizeof(jpeg), 0, 0, 0, 0 } };
+      Buffer pk; make_package(pk, e, 2, true);
+      CHECK(dat_parse_memory(pk.data, pk.size, o) && !dc2_background(o, 0, bg)); }
+
+    Buffer dec;
+    CHECK(dc2_mask_cells(ar.entries[3], dec) && dec.size == cells.size);
+    static u8 img[DC2_BG_W * DC2_BG_H * 4];
+    memset(img, 0, sizeof(img));
+    dc2_mask_draw(tiles, 2, dec.data, dec.size, img, 0);
+    #define PX(x, y) (img + ((y) * DC2_BG_W + (x)) * 4)
+    CHECK(PX(48, 80)[0] == 255 && PX(48, 80)[1] == 0 && PX(48, 80)[3] == 255);    /* tile 0, red */
+    CHECK(PX(63, 95)[0] == 255 && PX(63, 95)[1] == 0);                            /* its last pixel */
+    CHECK(PX(47, 80)[3] == 0 && PX(64, 80)[3] == 0 && PX(48, 79)[3] == 0);        /* the border is not drawn */
+    CHECK(PX(50, 81)[3] == 0);                                                    /* bit 15 clear: transparent */
+    CHECK(PX(304, 224)[1] == 255 && PX(304, 224)[0] == 0 && PX(319, 239)[1] == 255);
+    /* Tinted: half the tile's colour, half the tint */
+    static const u8 tint[3] = { 0, 0, 255 };
+    dc2_mask_draw(tiles, 1, dec.data, dec.size, img, tint);
+    CHECK(PX(48, 80)[0] == 127 && PX(48, 80)[2] == 127);
+    /* Cells for one tile only: the second is left alone */
+    memset(img, 0, sizeof(img));
+    dc2_mask_draw(tiles, 2, dec.data, 648, img, 0);
+    CHECK(PX(48, 80)[3] == 255 && PX(304, 224)[3] == 0);
+    #undef PX
+}
+
 int main()
 {
     test_detection();
@@ -1069,6 +1275,8 @@ int main()
     test_directory();
     test_slot2();
     test_slot1_and_7();
+    test_cameras();
+    test_backgrounds();
     test_op_table();
     test_routines_and_walk();
     test_scanners();
