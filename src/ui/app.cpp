@@ -17,6 +17,8 @@
 #include <string.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <ole2.h>
+#include <olectl.h>    /* OleLoadPicture: the JPEGs of a DC2 .DBS */
 #include <GL/gl.h>
 
 /* GET_X_LPARAM / GET_Y_LPARAM — avoid dependency on windowsx.h */
@@ -1137,10 +1139,61 @@ static void dc2_tree_add(HWND hTree, HTREEITEM parent, int i, const DatEntry& e)
     }
 }
 
+/*─── Dino Crisis 2: tree of an ST*.DBS ──────────────────────────*/
+/* One node per package, which is one camera's background: selecting it
+   shows the picture (sub-selector 1 on the JPEG's entry; M adds the mask
+   tiles).  Its children are the package's entries. */
+static void dc2_dbs_tree(HWND hTree, const DatArchive& ar)
+{
+    char label[160];
+    _snprintf(label, 159, "Backgrounds (%d)", ar.n_packages);
+    HTREEITEM hRoot = tree_add(hTree, TVI_ROOT, label, -1);
+    for (int p = 0; p < ar.n_packages; p++) {
+        Dc2Background bg;
+        if (!dc2_background(ar, p, bg)) {
+            _snprintf(label, 159, "Package %d (not a background)", p);
+            HTREEITEM h = tree_add(hTree, hRoot, label, -1);
+            for (int i = 0; i < ar.count; i++) {
+                if (ar.entries[i].package != p) continue;
+                _snprintf(label, 159, "#%d  %s  %u bytes", i, dat_type_name(ar.entries[i].type), ar.entries[i].size);
+                tree_add(hTree, h, label, i);
+            }
+            continue;
+        }
+        const DatEntry* e = ar.entries + bg.first;
+        _snprintf(label, 159, "Background %d  %dx%d, %d mask tile%s%s", p, bg.w, bg.h, bg.n_tiles,
+                  bg.n_tiles == 1 ? "" : "s", bg.kind == DC2_BG_PICTURE ? ", picture" : "");
+        HTREEITEM h = tree_add(hTree, hRoot, label, (LPARAM)((1 << 16) | (bg.first + 1)));
+        _snprintf(label, 159, "#%d  Mask table  %d tiles  %u bytes", bg.first, bg.n_tiles, e[0].size);
+        tree_add(hTree, h, label, bg.first);
+        _snprintf(label, 159, "#%d  JPEG  %dx%d  %u bytes", bg.first + 1, bg.w, bg.h, e[1].size);
+        tree_add(hTree, h, label, bg.first + 1);
+        if (bg.kind == DC2_BG_PLAIN) continue;
+        _snprintf(label, 159, "#%d  Palette  VRAM(%d,%d)  %u bytes", bg.first + 2, e[2].x, e[2].y, e[2].size);
+        tree_add(hTree, h, label, bg.first + 2);
+        if (bg.kind == DC2_BG_MASKED)
+            _snprintf(label, 159, "#%d  Mask tiles  %d x 18x18 16bpp (LZSS)  %u bytes", bg.first + 3, bg.n_tiles, e[3].size);
+        else
+            _snprintf(label, 159, "#%d  Picture  %ux%u 8bpp  VRAM(%d,%d) (LZSS)  %u bytes", bg.first + 3,
+                      e[3].w * 2, e[3].h, e[3].x, e[3].y, e[3].size);
+        tree_add(hTree, h, label, bg.first + 3);
+    }
+    TreeView_Expand(hTree, hRoot, TVE_EXPAND);
+}
+
 void App::build_tree() {
     TreeView_DeleteAllItems(hTree);
     g_emd_info_count = 0;
     if (!archive || archive->count == 0) return;
+
+    /* ──── Dino Crisis 2 ST*.DBS: one background per package ──── */
+    {
+        Dc2Background bg;
+        if (archive->is_dc2 && dc2_background(*archive, 0, bg)) {
+            dc2_dbs_tree(hTree, *archive);
+            return;
+        }
+    }
 
     /* ──── Item Sprite Bank: custom tree layout ──── */
     if (archive->is_item_bank) {
@@ -1902,6 +1955,116 @@ static void dc2_show_hex(const u8* data, size_t size)
     InvalidateRect(g_hex.hwnd, 0, TRUE);
 }
 
+/* Decode a JPEG into w x h RGBA with the system's picture loader, which
+   keeps the viewer free of libraries. */
+static bool dc2_decode_jpeg(const u8* data, size_t size, u8* rgba, int w, int h)
+{
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!mem) return false;
+    void* dst = GlobalLock(mem);
+    if (!dst) { GlobalFree(mem); return false; }
+    memcpy(dst, data, size);
+    GlobalUnlock(mem);
+
+    IStream* stream = 0;
+    if (FAILED(CreateStreamOnHGlobal(mem, TRUE, &stream)) || !stream) { GlobalFree(mem); return false; }
+    IPicture* pic = 0;
+    bool ok = false;
+    if (SUCCEEDED(OleLoadPicture(stream, (LONG)size, FALSE, IID_IPicture, (void**)&pic)) && pic) {
+        BITMAPINFO bi;
+        memset(&bi, 0, sizeof(bi));
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;            /* top-down */
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = 0;
+        HDC dc = CreateCompatibleDC(NULL);
+        HBITMAP bmp = dc ? CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+        if (bmp && bits) {
+            HGDIOBJ old = SelectObject(dc, bmp);
+            OLE_XSIZE_HIMETRIC pw = 0;
+            OLE_YSIZE_HIMETRIC ph = 0;
+            pic->get_Width(&pw);
+            pic->get_Height(&ph);
+            /* A picture's origin is its bottom left */
+            ok = SUCCEEDED(pic->Render(dc, 0, 0, w, h, 0, ph, pw, -ph, NULL));
+            GdiFlush();
+            const u8* src = (const u8*)bits;
+            for (int i = 0; ok && i < w * h; i++) {
+                rgba[i * 4]     = src[i * 4 + 2];
+                rgba[i * 4 + 1] = src[i * 4 + 1];
+                rgba[i * 4 + 2] = src[i * 4];
+                rgba[i * 4 + 3] = 255;
+            }
+            SelectObject(dc, old);
+        }
+        if (bmp) DeleteObject(bmp);
+        if (dc) DeleteDC(dc);
+        pic->Release();
+    }
+    stream->Release();
+    return ok;
+}
+
+/* An entry of an ST*.DBS.  The JPEG is shown as a picture; reached through
+   its "Background" node (sub = 1) it takes the mask tiles too, as M
+   sets: not at all, tinted over the picture, or alone.  The mask tiles'
+   entry shows them alone.  Returns false for the other entries (mask
+   table, palette, the 8-bit picture), which the usual views show. */
+static bool dc2_dbs_select(int idx, int sub, const DatEntry& e)
+{
+    Dc2Background bg;
+    if (!dc2_background(*g_app.archive, e.package, bg)) return false;
+    bool is_jpeg = idx == bg.first + 1;
+    bool is_cells = idx == bg.first + 3 && bg.kind == DC2_BG_MASKED;
+    if (!is_jpeg && !is_cells) return false;
+    if (bg.w != DC2_BG_W || bg.h != DC2_BG_H) return false;
+
+    const DatEntry* pe = g_app.archive->entries + bg.first;
+    u8* rgba = (u8*)calloc(DC2_BG_W * DC2_BG_H, 4);
+    if (!rgba) return false;
+    int mode = is_cells ? 2 : (sub == 1 && bg.kind == DC2_BG_MASKED) ? g_image.dc2_mask_mode : 0;
+    bool ok = mode == 2 || dc2_decode_jpeg(pe[1].data, pe[1].size, rgba, DC2_BG_W, DC2_BG_H);
+    if (mode == 2)
+        for (int i = 0; i < DC2_BG_W * DC2_BG_H; i++) { rgba[i * 4] = rgba[i * 4 + 2] = 48; rgba[i * 4 + 1] = 48; rgba[i * 4 + 3] = 255; }
+    if (mode != 0) {
+        static Dc2MaskTile tiles[DC2_MAX_MASK_TILES];
+        static const u8 tint[3] = { 255, 0, 255 };
+        int n = dc2_mask_tiles(pe[0].data, pe[0].size, tiles, DC2_MAX_MASK_TILES);
+        Buffer cells;
+        if (dc2_mask_cells(pe[3], cells))
+            dc2_mask_draw(tiles, n, cells.data, cells.size, rgba, mode == 1 ? tint : 0);
+    }
+    char buf[256];
+    if (!ok) {
+        _snprintf(buf, 255, "Entry %d: JPEG %dx%d, %u bytes  (the system could not decode it)", idx, bg.w, bg.h, e.size);
+        g_app.set_status(buf);
+        free(rgba);
+        return false;
+    }
+    g_image.cur_tex = 0; g_image.cur_pal = 0;
+    g_image.max_pal_rows = 1;
+    g_image.showing_face_cluts = false;
+    g_image.set_bitmap(rgba, DC2_BG_W, DC2_BG_H);
+    free(rgba);
+    if (is_cells)
+        _snprintf(buf, 255, "Entry %d: Mask tiles of background %d  -  %d tiles of 16x16 (18x18 cells, 16bpp, LZSS), %u bytes",
+                  idx, e.package, bg.n_tiles, e.size);
+    else if (sub == 1 && bg.kind == DC2_BG_MASKED)
+        _snprintf(buf, 255, "Background %d  -  %dx%d JPEG, %d mask tiles: %s  [M: mask tiles off / tinted / alone]",
+                  e.package, bg.w, bg.h, bg.n_tiles, mode == 0 ? "off" : mode == 1 ? "tinted" : "alone");
+    else
+        _snprintf(buf, 255, "%s %d  -  JPEG %dx%d, %u bytes%s", sub == 1 ? "Background" : "Entry",
+                  sub == 1 ? (int)e.package : idx, bg.w, bg.h, e.size,
+                  sub != 1 ? "  [Save Selected writes the .jpg]" : bg.kind == DC2_BG_PICTURE ? ", no mask tiles (8-bit picture instead)" : ", no mask tiles");
+    g_app.set_status(buf);
+    g_app.switch_panel(PANEL_IMAGE);
+    InvalidateRect(g_image.hwnd, 0, FALSE);
+    return true;
+}
+
 /* The archive holding the texture a model's header names: the open
    package, or else the .TEX of the same name next to it, or else, for
    WEP_P000.DAT and WEP_P100.DAT, the player's alternate-skin file as a
@@ -2074,6 +2237,10 @@ static void on_entry_select(int sel_param)
 
     int panel = PANEL_HEX;
 
+    if (g_app.archive->is_dc2 && e.type == DAT_DATA &&
+        dc2_dbs_select(idx, sub, e))
+        return;
+
     switch (effective_entry_type(e)) {
     case DAT_TEXTURE_LINEAR: {
         /* Item bank: CLUT is at the start of the NEXT block (after this
@@ -2107,12 +2274,13 @@ static void on_entry_select(int sel_param)
         const DatEntry* pal = 0;
         for (int j = idx + 1; j < g_app.archive->count; j++) {
             u32 jt = g_app.archive->entries[j].type;
+            if (g_app.archive->entries[j].package != e.package) break;   /* DC2 .DBS: its own package's */
             if (jt == DAT_PALETTE) { pal = &g_app.archive->entries[j]; break; }
             if (jt == DAT_TEXTURE || jt == DAT_LZSS1 || jt == DAT_TEXTURE_LINEAR ||
                 jt == DAT_DC2_LZSS2) break;
         }
         if (!pal) {
-            for (int j = idx - 1; j >= 0; j--) {
+            for (int j = idx - 1; j >= 0 && g_app.archive->entries[j].package == e.package; j--) {
                 if (g_app.archive->entries[j].type == DAT_PALETTE)
                     { pal = &g_app.archive->entries[j]; break; }
             }
@@ -2948,11 +3116,16 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int eidx = sel & 0xFFFF;
             if (eidx >= 0 && g_app.archive && eidx < g_app.archive->count) {
                 char path[MAX_PATH];
-                /* A DC2 music entry is a complete MP3 stream */
-                bool mp3 = g_app.archive->entries[eidx].type == DAT_DC2_MP3;
+                /* A DC2 music entry is a complete MP3 stream, and a .DBS
+                   background a complete JPEG file */
+                const DatEntry& xe = g_app.archive->entries[eidx];
+                bool mp3 = xe.type == DAT_DC2_MP3;
+                int jw, jh;
+                bool jpg = g_app.archive->is_dc2 && xe.type == DAT_DATA && dc2_jpeg_size(xe.data, xe.size, jw, jh);
                 if (ui_save_file(hwnd, path, MAX_PATH,
-                    mp3 ? "MP3 Audio (*.mp3)\0*.mp3\0All Files (*.*)\0*.*\0" : "All Files (*.*)\0*.*\0",
-                    "Export Entry", mp3 ? "mp3" : "bin")) {
+                    mp3 ? "MP3 Audio (*.mp3)\0*.mp3\0All Files (*.*)\0*.*\0" :
+                    jpg ? "JPEG Image (*.jpg)\0*.jpg\0All Files (*.*)\0*.*\0" : "All Files (*.*)\0*.*\0",
+                    "Export Entry", mp3 ? "mp3" : jpg ? "jpg" : "bin")) {
                     FILE* f = fopen(path, "wb");
                     if (f) {
                         fwrite(g_app.archive->entries[eidx].data, 1,

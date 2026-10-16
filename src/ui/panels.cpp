@@ -691,6 +691,13 @@ LRESULT CALLBACK ImagePanelProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             InvalidateRect(hwnd, 0, FALSE);
             return 0;
         }
+        /* M: a DC2 background's mask tiles (off, tinted, alone) */
+        if (wp == 'M' && g_app.archive && g_app.archive->is_dc2) {
+            g_image.dc2_mask_mode = (g_image.dc2_mask_mode + 1) % 3;
+            g_app.refresh_selection();
+            InvalidateRect(hwnd, 0, FALSE);
+            return 0;
+        }
         if (g_image.max_pal_rows > 1) {
             if (wp == VK_UP) {
                 if (g_image.pal_row > 0) {

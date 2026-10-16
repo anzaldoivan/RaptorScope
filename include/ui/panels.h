@@ -73,6 +73,10 @@ struct ImagePanel {
     int         n_face_uses;
     bool        face_uses_ready;     /* face_uses collected for this archive */
 
+    /* Dino Crisis 2 background (M): 0 = picture, 1 = mask tiles tinted
+       over it, 2 = mask tiles alone */
+    int         dc2_mask_mode;
+
     ImagePanel() : hwnd(0), hBmp(0), img_w(0), img_h(0),
                    bpp(8), pal_row(0), sub_pal(0), max_pal_rows(1),
                    cur_tex(0), cur_pal(0), cur_is_linear(false),
@@ -81,7 +85,7 @@ struct ImagePanel {
                    drag_pan_x(0), drag_pan_y(0), fitted(true),
                    fit_to_screen(1),
                    face_cluts(true), showing_face_cluts(false),
-                   face_uses(0), n_face_uses(0), face_uses_ready(false) {}
+                   face_uses(0), n_face_uses(0), face_uses_ready(false), dc2_mask_mode(0) {}
     ~ImagePanel() { if (hBmp) DeleteObject(hBmp); free(face_uses); }
 
     void clear_face_usage();               /* call when the archive changes */
