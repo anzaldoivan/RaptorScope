@@ -294,8 +294,9 @@ def main():
     # ---- voice --------------------------------------------------------
     for r in rows["WAV"]:
         stem = int(os.path.splitext(r[0])[0])
-        want = ("1", "1", "2", "37800", "16") if stem >= 1000 else ("1", "1", "1", "18900", "16")
-        report.check("voice files", r[0], tuple(r[1:6]), want)
+        # RIFF, PCM, channels, rate, bits, data chunk fits: what AudioPanel::load_wav needs
+        want = ("1", "1", "2", "37800", "16", "1") if stem >= 1000 else ("1", "1", "1", "18900", "16", "1")
+        report.check("voice files", r[0], tuple(r[1:7]), want)
 
     music = [n for n in mp3 if n[:3] in ("MS_", "ME_", "MF_")]
     report.note("music", "MP3 entries outside MS_/ME_/MF_ files: "

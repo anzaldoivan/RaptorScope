@@ -193,7 +193,9 @@ static void package(const char* dirpath, const char* name)
 }
 
 /* Speech/NNNN.dat is a plain RIFF/WAVE file; the viewer opens it by that
-   signature.  Print what its fmt chunk says. */
+   signature (AudioPanel::load_wav).  Print what the loader goes by: PCM
+   format tag, channels, rate, bits, and whether the "fmt " chunk is
+   followed by a "data" chunk that fits in the file. */
 static void voice(const char* dirpath, const char* name)
 {
     char path[1024];
@@ -202,11 +204,15 @@ static void voice(const char* dirpath, const char* name)
     if (!f) return;
     u8 h[44];
     size_t got = fread(h, 1, sizeof(h), f);
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
     fclose(f);
     bool riff = got == sizeof(h) && !memcmp(h, "RIFF", 4) && !memcmp(h + 8, "WAVE", 4);
-    bool fmt = riff && !memcmp(h + 12, "fmt ", 4);
-    printf("WAV\t%s\t%d\t%u\t%u\t%u\t%u\n", name, riff ? 1 : 0, fmt ? rd_u16(h + 20) : 0,
-           fmt ? rd_u16(h + 22) : 0, fmt ? rd_u32(h + 24) : 0, fmt ? rd_u16(h + 34) : 0);
+    bool fmt = riff && !memcmp(h + 12, "fmt ", 4) && rd_u32(h + 16) == 16;
+    bool data = fmt && !memcmp(h + 36, "data", 4) && rd_u32(h + 40) > 0 &&
+                44 + (unsigned long)rd_u32(h + 40) <= (unsigned long)size;
+    printf("WAV\t%s\t%d\t%u\t%u\t%u\t%u\t%d\n", name, riff ? 1 : 0, fmt ? rd_u16(h + 20) : 0,
+           fmt ? rd_u16(h + 22) : 0, fmt ? rd_u32(h + 24) : 0, fmt ? rd_u16(h + 34) : 0, data ? 1 : 0);
 }
 
 static int by_name(const void* a, const void* b) { return strcmp(*(char* const*)a, *(char* const*)b); }
