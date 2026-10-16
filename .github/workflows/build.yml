@@ -52,7 +52,7 @@ jobs:
           Remove-Item stage\*.obj -ErrorAction SilentlyContinue
           $last = git describe --tags --abbrev=0 "HEAD^" 2>$null
           $range = if ($last) { "$last..HEAD" } else { "HEAD~20..HEAD" }
-          $notes = @("# RaptorScope DC1 GLB: $(Get-Date -Format yyyy-MM-dd) build", "",
+          $notes = @("# RaptorScope (dinorand fork): $(Get-Date -Format yyyy-MM-dd) build", "",
                      "Automated build of the dinorand fork. Commits since $($last ?? 'the last 20'):", "")
           $notes += git log --format="- %s" $range
           $notes += @("", "Built from $(git rev-parse --short HEAD) on $env:GITHUB_REF_NAME.")
