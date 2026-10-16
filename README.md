@@ -140,9 +140,9 @@ Only what the dinorand project has decoded is shown. A room's visible scene is n
 | File | What you get |
 |---|---|
 | Any package (`*.DAT`, `*.TEX`, `*.DBS`) | Entry tree, hex view, Save Selected, Export Decompressed, Import / Replace, Save As |
-| `E*.DAT`, `WEP_*.DAT`, `DOOR*.DAT`, `KOF_*.DAT` and other model packages | The model in its bind pose in the 3D viewer, with OBJ, SMD and GLB export. An enemy's skin is taken from the `.TEX` of the same name in the same folder (`E00.TEX` for `E00.DAT`) |
+| `E*.DAT`, `WEP_*.DAT`, `DOOR*.DAT`, `KOF_*.DAT` and other model packages | The model in its bind pose in the 3D viewer, with OBJ, SMD and GLB export. An enemy's skin is taken from the `.TEX` of the same name in the same folder (`E00.TEX` for `E00.DAT`). `WEP_P000.DAT` and `WEP_P100.DAT` carry no skin and are shown with `WP00A.DAT` / `WP10A.DAT` from the same folder as a stand-in (alternate skin) |
 | `ST*.DAT` | **Scene**: collision polygons, zones, doors with their destination room, triggers, item pickups, enemy spawns and markers, drawn as an overlay (O). **F4**: the room script. One node per section of the room, each opening as hex |
-| Textures and palettes in any package | The image panel, with the same depth and palette keys as for Dino Crisis |
+| Textures and palettes in any package | The image panel. A texture that a model of the same package samples is decoded with that model's depth and CLUT (**C** switches to one palette). A palette shorter than 256 colours makes the texture 4-bit; **Up/Down** steps through its 16-colour sub-palettes |
 | `TITLE.DAT`, `*.PXL` | 320x240 pictures |
 | `MS_*.DAT`, `ME_*.DAT`, `MF_*.DAT` | Each music track listed; Save Selected writes it as an `.mp3`. There is no MP3 playback |
 | `Speech\NNNN.dat` | Plays as audio (the files are WAV) |
@@ -152,8 +152,9 @@ Not available for Dino Crisis 2, because the formats are not decoded: the room m
 Limits of what is shown:
 
 - A door, trigger, item or spawn whose position the script computes while the game runs is listed in the script (F4) but not drawn. Most raptor spawns are like this.
-- Player models (`WEP_P*.DAT`) open untextured: their skin is not in the package, and where it is stored is not known.
-- Nothing says whether a texture is 4-bit or 8-bit. If a texture looks wrong, switch the depth and palette with the image panel's keys.
+- `WEP_P000.DAT` and `WEP_P100.DAT` have no skin of their own. The alternate-skin file shown in its place is one the game loads only when a flag is set, so the default skin may differ. Models in `SC*.DAT`, `RES0*.DAT` and `M_TITLE.DAT` whose texture is not in their package open untextured.
+- A texture no model samples (every room texture) is shown with the palette stored after it and, at 4-bit, its first sub-palette; which one the game uses is not known.
+- `M_RESULT.DAT`'s model is shown with the palette stored after its texture, not the one its header names, which does not fit that texture.
 - Room names are in the executable, so the tree shows file names.
 
 ## Building
@@ -304,6 +305,8 @@ Records are built from the run of pushes in front of an opcode. The last push is
 
 Corners are four `x, z` pairs, first pair at the highest offset.
 
+**Textures.** A texture is stored as whole 64-byte by 32-row tiles even when its height is not a multiple of 32 (a 64x136 texture has 160 rows of data), in both games. A palette shorter than 512 bytes is 16-colour sub-palettes side by side, 32 bytes each, and several palettes can share a VRAM row at different x.
+
 **Model** (DCM, a type 5 entry). Header: vertex, normal, triangle and quad pool pointers, `u16` triangle and quad counts, `u32` part count, `u16 tpage, clut`. Then the parts, 20 bytes each: `s16 x, y, z` offset from the parent, `s8 parent`, `u8 n`, triangle and quad pointers, `u16` triangle and quad counts. Vertices and normals are 8 bytes, triangles 12 (three indices, three UVs) and quads 16. Part *i* owns the next 3 x *n* vertices of the pool and its bone places them. A quad is a strip: (v0, v1, v2) and (v1, v3, v2). All faces share the header's tpage and clut.
 
 ### PSX Transparency Rules
@@ -317,6 +320,8 @@ The tool implements the PSX GPU transparency pipeline:
 | STP=1 + color | 1 | 4bpp sub-palette | 128 | Semi-transparent decal (blood) |
 | STP=1 + color | 1 | 8bpp palette | 255 | Default VRAM state, NOT transparency |
 | STP=0 + color | 0 | Any | 255 | Fully opaque |
+
+In a Dino Crisis 2 atlas, index 0 with `0x8000` is opaque black: its models are drawn opaque and use the index for dark texels.
 
 ### Texture Atlas
 
