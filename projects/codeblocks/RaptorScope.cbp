@@ -56,6 +56,7 @@
 		<Unit filename="../../include/formats/mesh.h" />
 		<Unit filename="../../include/formats/save_editor.h" />
 		<Unit filename="../../include/formats/scd.h" />
+		<Unit filename="../../include/formats/dc2.h" />
 		<Unit filename="../../include/formats/texture.h" />
 		<Unit filename="../../include/formats/tim.h" />
 		<Unit filename="../../include/ui/app.h" />
@@ -72,6 +73,9 @@
 		<Unit filename="../../src/formats/mesh.cpp" />
 		<Unit filename="../../src/formats/save_editor.cpp" />
 		<Unit filename="../../src/formats/scd.cpp" />
+		<Unit filename="../../src/formats/dc2_room.cpp" />
+		<Unit filename="../../src/formats/dc2_scd.cpp" />
+		<Unit filename="../../src/formats/dc2_model.cpp" />
 		<Unit filename="../../src/formats/texture.cpp" />
 		<Unit filename="../../src/formats/tim.cpp" />
 		<Unit filename="../../src/formats/video.cpp" />

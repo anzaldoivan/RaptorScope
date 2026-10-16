@@ -333,6 +333,7 @@ struct RdtFloorZone {
     u8  target_index;         /* floor zone: footstep step (sound 0xB0 + 2 * step); 0x28 zone: type */
     u8  flags;                /* floor zone: record byte +18 (0 in every room); 0x28 zone: 0 */
     u8  kind;                 /* RDT_ZONE_FLOOR or RDT_ZONE_TRIGGER, set by the parser that adds it */
+    s16 arg;                  /* DC2 script zone: door destination, routine or item id; -1 = computed by the script */
 };
 
 /*─── Collision rectangle ───────────────────────────────────────*/
@@ -448,6 +449,14 @@ struct RdtLightColor {
     u16 value;                /* intensity/color value */
 };
 
+/*─── Dino Crisis 2 collision polygon (room slot 2) ────────────*/
+#define RDT_MAX_POLYS    128
+#define RDT_MAX_POLY_PTS 1024
+struct RdtPoly {
+    u16 first, count;         /* points in RdtSceneOverlay::poly_pts */
+    u8  flags, index;         /* record bytes +0 and +2 */
+};
+
 /*─── Complete RDT scene overlay ────────────────────────────────*/
 struct RdtSceneOverlay {
     RdtFloorZone      zones[64];       int n_zones;
@@ -463,6 +472,12 @@ struct RdtSceneOverlay {
     RdtEnemySpawn     enemies[RDT_MAX_OBJECTS]; int n_enemies;
     RdtFogParams      fog[8];          int n_fog;
     RdtLightColor     light_cols[64];  int n_light_cols;
+
+    /* Dino Crisis 2 room (dc2_room_overlay): the names and labels of the
+       overlay tree change, and collision is polygons instead of rects. */
+    u8                dc2;
+    RdtPoly           polys[RDT_MAX_POLYS];  int n_polys;
+    s16               poly_pts[RDT_MAX_POLY_PTS][2];  int n_poly_pts;  /* (x, z) */
 
     /* Camera thread activation zones from ptr[3].
        Each thread has a 4-corner XZ quad at +4..+19 defining where

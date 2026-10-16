@@ -43,6 +43,9 @@ SRCS = src/main.cpp \
        src/formats/video.cpp \
        src/formats/save_editor.cpp \
        src/formats/scd.cpp \
+       src/formats/dc2_room.cpp \
+       src/formats/dc2_scd.cpp \
+       src/formats/dc2_model.cpp \
        src/ui/app.cpp \
        src/ui/panels.cpp
 

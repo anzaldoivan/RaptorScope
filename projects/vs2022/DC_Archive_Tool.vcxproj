@@ -232,6 +232,9 @@
     <ClCompile Include="..\..\src\formats\mesh.cpp" />
     <ClCompile Include="..\..\src\formats\save_editor.cpp" />
     <ClCompile Include="..\..\src\formats\scd.cpp" />
+    <ClCompile Include="..\..\src\formats\dc2_room.cpp" />
+    <ClCompile Include="..\..\src\formats\dc2_scd.cpp" />
+    <ClCompile Include="..\..\src\formats\dc2_model.cpp" />
     <ClCompile Include="..\..\src\formats\texture.cpp" />
     <ClCompile Include="..\..\src\formats\tim.cpp" />
     <ClCompile Include="..\..\src\formats\video.cpp" />
@@ -252,6 +255,7 @@
     <ClInclude Include="..\..\include\formats\mesh.h" />
     <ClInclude Include="..\..\include\formats\save_editor.h" />
     <ClInclude Include="..\..\include\formats\scd.h" />
+    <ClInclude Include="..\..\include\formats\dc2.h" />
     <ClInclude Include="..\..\include\formats\texture.h" />
     <ClInclude Include="..\..\include\formats\tim.h" />
     <ClInclude Include="..\..\include\ui\app.h" />

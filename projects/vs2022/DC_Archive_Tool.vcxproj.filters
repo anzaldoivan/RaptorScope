@@ -59,6 +59,15 @@
     <ClCompile Include="..\..\src\formats\tim.cpp">
       <Filter>src\formats</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\src\formats\dc2_room.cpp">
+      <Filter>src\formats</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\formats\dc2_scd.cpp">
+      <Filter>src\formats</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\src\formats\dc2_model.cpp">
+      <Filter>src\formats</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\src\formats\video.cpp">
       <Filter>src\formats</Filter>
     </ClCompile>

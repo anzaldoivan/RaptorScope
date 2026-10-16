@@ -107,7 +107,7 @@ Both exes are MSVC x64 builds with the static runtime (`/MT`), so they need no e
 3. **CLI.** In a scratch folder, from cmd.exe:
    ```bat
    call "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvars64.bat"
-   cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I E:\RaptorScope\include E:\RaptorScope\tools\dc1_export.cpp E:\RaptorScope\src\formats\dat.cpp E:\RaptorScope\src\formats\mesh.cpp E:\RaptorScope\src\core\lzss.cpp /Fe:dc1_export.exe
+   cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I E:\RaptorScope\include E:\RaptorScope\tools\dc1_export.cpp E:\RaptorScope\src\formats\dat.cpp E:\RaptorScope\src\formats\mesh.cpp E:\RaptorScope\src\formats\dc2_model.cpp E:\RaptorScope\src\core\lzss.cpp /Fe:dc1_export.exe
    ```
    Run with no arguments, it should print its usage line and exit with code 2.
 4. **Notes.** Write `RELEASE_NOTES.md`, following the rules below.

@@ -252,9 +252,10 @@ struct ScdDisasm {
     int         capacity;
     int         n_threads;
     u32         thread_offsets[64];  /* relative offsets from SCD start */
+    bool        dc2;                 /* Dino Crisis 2 script: opcodes are dc2.h's, not g_scd_opcodes */
 
-    void init()  { lines = 0; n_lines = 0; capacity = 0; n_threads = 0; }
-    void clear() { free(lines); lines = 0; n_lines = 0; capacity = 0; n_threads = 0; }
+    void init()  { lines = 0; n_lines = 0; capacity = 0; n_threads = 0; dc2 = false; }
+    void clear() { free(lines); lines = 0; n_lines = 0; capacity = 0; n_threads = 0; dc2 = false; }
 
     ScdLine& add() {
         if (n_lines >= capacity) {
