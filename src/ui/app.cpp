@@ -1624,8 +1624,9 @@ static void layout_main(HWND hwnd)
  *       tex_vram_x = min VRAM X and tex_w = total pixel width
  *═══════════════════════════════════════════════════════════════════*/
 /* src: the archive to take textures and palettes from, when it is not
-   the open one (a Dino Crisis 2 enemy's .TEX) */
-static void upload_archive_texture(DatArchive* src = 0)
+   the open one (a Dino Crisis 2 enemy's .TEX).  force rebuilds the atlas
+   even when the cache below thinks it has this archive (B13). */
+static void upload_archive_texture(DatArchive* src = 0, bool force = false)
 {
     if (!src) src = g_app.archive;
     if (!src) return;
@@ -1637,7 +1638,7 @@ static void upload_archive_texture(DatArchive* src = 0)
     static u16         s_cached_cluts[512];
     bool same_cluts = (g_viewer3d.n_used_cluts == s_cached_n_cluts &&
                        memcmp(s_cached_cluts, g_viewer3d.used_cluts, g_viewer3d.n_used_cluts * 2) == 0);
-    if (&ar == s_cached_archive && same_cluts && g_viewer3d.tex_w > 0)
+    if (!force && &ar == s_cached_archive && same_cluts && g_viewer3d.tex_w > 0)
         return;
     s_cached_archive = &ar;
     s_cached_n_cluts = g_viewer3d.n_used_cluts;
@@ -2194,7 +2195,8 @@ static void dc2_show_hex(const u8* data, size_t size)
 }
 
 /* The archive holding the texture a model's header names: the open
-   package, or else the .TEX of the same name next to it. */
+   package, or else the .TEX of the same name next to it.  0 when neither
+   has it (player models: WEP_P000.DAT's own texture is the weapon's). */
 static DatArchive* dc2_texture_source(u16 tpage, u16 clut)
 {
     int tex, pal;
@@ -2211,7 +2213,7 @@ static DatArchive* dc2_texture_source(u16 tpage, u16 clut)
         }
     }
     if (g_dc2_skin && dc2_model_texture(*g_dc2_skin, tpage, clut, tex, pal)) return g_dc2_skin;
-    return g_app.archive;
+    return 0;
 }
 
 /* A DCM model, in its bind pose.  Every face has the header's tpage and
@@ -2240,8 +2242,12 @@ static bool dc2_show_model(int idx, const DatEntry& e, const u8* dd, size_t ds)
         g_viewer3d.n_used_cluts = 1;
         if (depth == 0) g_viewer3d.max_sub_pal = clut & 0x3F;
     }
+    /* Every enemy skin is one page at the same place with the same CLUT,
+       and a closed archive's address is soon reused, so the atlas cache
+       cannot tell E00's skin from E40's: always rebuild. */
     DatArchive* src = dc2_texture_source(tpage, clut);
-    upload_archive_texture(src);
+    if (src) upload_archive_texture(src, true);
+    else     g_viewer3d.clear_texture();
 
     /* UV editor crop: the one texture page the model samples */
     {
@@ -2268,8 +2274,7 @@ static bool dc2_show_model(int idx, const DatEntry& e, const u8* dd, size_t ds)
     char buf[256];
     _snprintf(buf, 255, "Entry %d: DC2 Model  -  %d verts, %d faces, %d bones  |  texture: %s  (bind pose; DC2 animation is not decoded)",
               idx, em.vert_count, em.tri_count, g_emd_model->skeleton.bone_count,
-              src == g_dc2_skin ? "from the .TEX file" :
-              g_viewer3d.has_texture ? "this package" : "not found");
+              !src ? "not found" : src == g_dc2_skin ? "from the .TEX file" : "this package");
     g_app.set_status(buf);
     g_app.switch_panel(PANEL_3D);
     return true;
