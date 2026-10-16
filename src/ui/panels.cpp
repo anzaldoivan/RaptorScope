@@ -3093,8 +3093,8 @@ void ViewerPanel3D::update_shot(bool lock) {
     cam_yaw = atan2f(dx, dz) * 180.0f / 3.14159265f;
     cam_upx = 0; cam_upy = 1; cam_upz = 0;
     /* DC2 roll (36 of 1169 cameras): turn the up vector about the view
-       axis, as dc2_camera_project turns the picture.  The sign has not
-       been checked against the game. */
+       axis, as dc2_camera_project turns the picture (see there for what
+       the sign rests on). */
     s16 roll = cached_overlay.cam_threads[shot_cur].roll;
     if (cached_overlay.dc2 && roll) {
         f32 f[3] = { -dx / d, -dy / d, -dz / d };            /* eye to target */

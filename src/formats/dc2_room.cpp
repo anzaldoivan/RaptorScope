@@ -214,8 +214,10 @@ int dc2_room_cameras(const u8* dec, size_t dec_size, const Dc2RoomDir& dir,
 /* The game's projection, y down: forward is eye to target, right is
    down x forward, and the screen centre is (160, 120).  By eye it fits
    ST101's camera 0 and ST102's camera 2.  Roll turns the picture about the
-   forward axis in units of 4096 a turn; it is 0 in all but 36 cameras and
-   its sign has not been checked against the game. */
+   forward axis in units of 4096 a turn; it is 0 in all but 36 cameras.
+   Its sign is taken from one picture: with this sign the floor line of
+   ST504's camera 5 (roll 146) slopes with the painted floor, and with the
+   other it slopes against it.  It has not been checked in the game. */
 bool dc2_camera_project(const Dc2Camera& cam, const f32 p[3], f32 screen[2])
 {
     f32 f[3], v[3];
