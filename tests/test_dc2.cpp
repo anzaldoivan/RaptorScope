@@ -4,9 +4,11 @@
    Build and run:
      g++ -std=c++11 -Iinclude -D_snprintf=snprintf tests/test_dc2.cpp \
          src/formats/dat.cpp src/formats/dc2_room.cpp src/formats/dc2_scd.cpp \
-         src/formats/dc2_model.cpp src/core/lzss.cpp -o test_dc2 && ./test_dc2 */
+         src/formats/dc2_model.cpp src/formats/texture.cpp src/formats/mesh.cpp \
+         src/core/lzss.cpp src/core/color.cpp -o test_dc2 && ./test_dc2 */
 #include "formats/dat.h"
 #include "formats/dc2.h"
+#include "formats/texture.h"
 #include "core/lzss.h"
 #include <stdio.h>
 #include <string.h>
@@ -784,6 +786,264 @@ static void test_model()
     CHECK(!dc2_model_texture(ar, 0x009E, 0x0000, tex, pal) && tex == 2 && pal == -1);
     /* 16bpp needs no palette */
     CHECK(dc2_model_texture(ar, 0x011E, 0x0000, tex, pal) && tex == 2 && pal == -1);
+
+    /* The alternate-skin file that stands in for a player package's skin */
+    char alt[16];
+    CHECK(dc2_alt_skin_name("WEP_P000.DAT", alt) && strcmp(alt, "WP00A.DAT") == 0);
+    CHECK(dc2_alt_skin_name("wep_p100.dat", alt) && strcmp(alt, "WP10A.DAT") == 0);
+    CHECK(!dc2_alt_skin_name("WEP_P20A.DAT", alt) && !dc2_alt_skin_name("WEP_P010.DAT", alt));
+    CHECK(!dc2_alt_skin_name("E00.DAT", alt) && !dc2_alt_skin_name("", alt) && !dc2_alt_skin_name("WEP_P00", alt));
+}
+
+/*─── Textures ───────────────────────────────────────────────────*/
+
+/* A texture of vram_w halfwords by rows (a multiple of 32) whose byte at
+   (x, y) is tex_byte(x, y), stored as the game does: 64-byte by 32-row
+   tiles, left to right, top to bottom. */
+static u8 tex_byte(int x, int y) { return (u8)(x * 7 + y * 13 + 1); }
+static void make_texture(Buffer& out, int vram_w, int rows)
+{
+    out.clear();
+    for (int by = 0; by < rows / 32; by++)
+        for (int bx = 0; bx < vram_w * 2 / 64; bx++)
+            for (int y = 0; y < 32; y++)
+                for (int x = 0; x < 64; x++) out.push(tex_byte(bx * 64 + x, by * 32 + y));
+}
+
+/* A palette of n colours, none of them 0x0000 or with the STP bit */
+static u16 pal_colour(u16 seed, int i) { return (u16)(((i * 131 + seed) & 0x7FFF) | 1); }
+static void make_palette(Buffer& out, int n, u16 seed)
+{
+    out.clear();
+    for (int i = 0; i < n; i++) add16(out, pal_colour(seed, i));
+}
+
+static u16 clut_at(int x, int y) { return (u16)((y << 6) | (x / 16)); }
+
+/* The atlas pixel a face with this tpage and clut reads for texel (u, v) */
+static const u8* atlas_texel(const TexAtlasLayout& a, const u8* rgba, u16 tpage, u16 clut, int u, int v)
+{
+    u8 uv[3][2] = { { (u8)u, (u8)v }, { (u8)u, (u8)v }, { (u8)u, (u8)v } };
+    float st[3][2];
+    atlas_face_uv(a, tpage, clut, uv, st);
+    int x = (int)(st[0][0] * a.w), y = (int)(st[0][1] * a.h);
+    if (x < 0 || x >= a.w || y < 0 || y >= a.h) return 0;
+    return rgba + ((size_t)y * a.w + x) * 4;
+}
+static bool is_colour(const u8* p, u16 bgr, u8 alpha = 255)
+{
+    RGBA8 c = bgr555_to_rgba(bgr);
+    return p && p[0] == c.r && p[1] == c.g && p[2] == c.b && p[3] == alpha;
+}
+
+static void test_atlas()
+{
+    Buffer skin, weapon, pal_a, pal_b, pal_w;
+    make_texture(skin, 128, 256);
+    make_texture(weapon, 64, 160);
+    make_palette(pal_a, 256, 100);
+    make_palette(pal_b, 256, 9000);
+    make_palette(pal_w, 48, 20000);
+    const u16 SKIN = 0x009E;                 /* page (896, 256), 8bpp */
+    TexAtlasLayout lay;
+    u8* rgba = 0;
+    bool is4[4] = { false, false, false, false };
+
+    /* E00.TEX: one page, one palette, and the model's CLUT on it */
+    {
+        PkgEntry e[] = { { 1, skin.data, (u32)skin.size, 896, 256, 128, 256 },
+                         { 2, pal_a.data, 512, 0, 511, 256, 1 } };
+        Buffer pkg; make_package(pkg, e, 2, true);
+        DatArchive ar; CHECK(dat_parse_memory(pkg.data, pkg.size, ar));
+        u16 cl = clut_at(0, 511);
+        CHECK(build_texture_atlas(ar, &cl, is4, 1, 16384, lay, &rgba) == 1);
+        CHECK(lay.w == 128 * 4 && lay.h == 512 && lay.num_slices == 1 && lay.bpp == 4);
+        CHECK(lay.vram_x == 896 && lay.vram_y == 0 && lay.clut_base_x == 0 && lay.clut_base_y == 511);
+        CHECK(atlas_face_slice(lay, SKIN, cl) == 0);
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, 0, 0), pal_colour(100, tex_byte(0, 0))));
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, 255, 255), pal_colour(100, tex_byte(255, 255))));
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, 100, 200), pal_colour(100, tex_byte(100, 200))));
+        /* An 8bpp texel is two atlas pixels wide; the page's upper half is empty */
+        CHECK(memcmp(rgba + ((size_t)(256 + 200) * lay.w + 200) * 4,
+                     rgba + ((size_t)(256 + 200) * lay.w + 201) * 4, 4) == 0);
+        CHECK(rgba[3] == 255 && rgba[0] == 0);
+        free(rgba);
+
+        /* The atlas is capped to the height it is given */
+        u16 two[2] = { clut_at(0, 511), clut_at(16, 511) };
+        bool four[2] = { false, true };
+        CHECK(build_texture_atlas(ar, two, four, 2, 16384, lay, &rgba) == 1 && lay.num_slices == 2 && lay.h == 1024);
+        free(rgba);
+        CHECK(build_texture_atlas(ar, two, four, 2, 512, lay, &rgba) == 1 && lay.num_slices == 1 && lay.h == 512);
+        CHECK(atlas_face_slice(lay, 0x001E, two[1]) == 0);
+        free(rgba);
+    }
+
+    /* A skin on two pages, each with its palette after it on its own row
+       (E32.DAT): a face reads its page with the CLUT it names */
+    {
+        PkgEntry e[] = { { 1, skin.data, (u32)skin.size, 896, 256, 128, 256 }, { 2, pal_a.data, 512, 0, 511, 256, 1 },
+                         { 6, 0, 0, 768, 256, 128, 256 },                       { 2, pal_b.data, 512, 0, 510, 256, 1 } };
+        Buffer lz; CHECK(lzss_compress(skin.data, skin.size, lz));
+        e[2].data = lz.data; e[2].size = (u32)lz.size;
+        Buffer pkg; make_package(pkg, e, 4, true);
+        DatArchive ar; CHECK(dat_parse_memory(pkg.data, pkg.size, ar));
+        u16 cl[2] = { clut_at(0, 511), clut_at(0, 510) };
+        CHECK(build_texture_atlas(ar, cl, is4, 2, 16384, lay, &rgba) == 1);
+        CHECK(lay.num_slices == 2 && lay.num_pal_rows == 2 && lay.clut_base_y == 510 && lay.vram_x == 768);
+        CHECK(atlas_face_slice(lay, SKIN, cl[0]) != atlas_face_slice(lay, 0x009C, cl[1]));
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl[0], 30, 40), pal_colour(100, tex_byte(30, 40))));
+        CHECK(is_colour(atlas_texel(lay, rgba, 0x009C, cl[1], 30, 40), pal_colour(9000, tex_byte(30, 40))));
+        free(rgba);
+    }
+
+    /* Palettes before the texture: no palette follows it, so the CLUT's
+       position picks one.  It used to get the first palette in the file. */
+    {
+        PkgEntry e[] = { { 2, pal_a.data, 512, 0, 510, 256, 1 }, { 2, pal_b.data, 512, 0, 511, 256, 1 },
+                         { 1, skin.data, (u32)skin.size, 896, 256, 128, 256 } };
+        Buffer pkg; make_package(pkg, e, 3, true);
+        DatArchive ar; CHECK(dat_parse_memory(pkg.data, pkg.size, ar));
+        u16 cl = clut_at(0, 511);
+        CHECK(build_texture_atlas(ar, &cl, is4, 1, 16384, lay, &rgba) == 1);
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, 7, 9), pal_colour(9000, tex_byte(7, 9))));
+        free(rgba);
+        /* A DC1 archive keeps the old pairing */
+        make_package(pkg, e, 3, false);
+        DatArchive ar1; CHECK(dat_parse_memory(pkg.data, pkg.size, ar1) && !ar1.is_dc2);
+        CHECK(build_texture_atlas(ar1, &cl, is4, 1, 16384, lay, &rgba) == 1);
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, 7, 9), pal_colour(100, tex_byte(7, 9))));
+        free(rgba);
+    }
+
+    /* WEP_P001.DAT: the skin with its palette at x = 0, then a 4bpp
+       weapon texture, 64x136 in the header and 160 rows in the data, with
+       three sub-palettes at x = 160.  A face naming the second one, at
+       (176, 504), gets colours 16-31 of that palette. */
+    {
+        PkgEntry e[] = { { 1, skin.data, (u32)skin.size, 896, 0, 128, 256 }, { 2, pal_a.data, 512, 0, 502, 256, 1 },
+                         { 1, weapon.data, (u32)weapon.size, 640, 0, 64, 136 }, { 2, pal_w.data, 96, 160, 504, 48, 1 } };
+        Buffer pkg; make_package(pkg, e, 4, true);
+        DatArchive ar; CHECK(dat_parse_memory(pkg.data, pkg.size, ar));
+        const u16 WEAPON = 0x000A;           /* page (640, 0), 4bpp */
+        u16 cl[2] = { clut_at(176, 504), clut_at(0, 502) };
+        bool four[2] = { true, false };
+        CHECK(build_texture_atlas(ar, cl, four, 2, 16384, lay, &rgba) == 1);
+        CHECK(lay.clut_base_x == 0 && lay.clut_base_y == 502 && lay.vram_x == 640);
+        /* texel u of a 4bpp row: low nibble first.  Row 130 is in the last,
+           partly used tile row. */
+        CHECK(is_colour(atlas_texel(lay, rgba, WEAPON, cl[0], 10, 5), pal_colour(20000, 16 + (tex_byte(5, 5) & 15))));
+        CHECK(is_colour(atlas_texel(lay, rgba, WEAPON, cl[0], 11, 5), pal_colour(20000, 16 + (tex_byte(5, 5) >> 4))));
+        CHECK(is_colour(atlas_texel(lay, rgba, WEAPON, cl[0], 201, 130), pal_colour(20000, 16 + (tex_byte(100, 130) >> 4))));
+        /* and the skin, on the same atlas, with its own */
+        CHECK(is_colour(atlas_texel(lay, rgba, 0x008E, cl[1], 50, 60), pal_colour(100, tex_byte(50, 60))));
+        free(rgba);
+        /* DC1 counts sub-palettes from the first palette's x: unchanged */
+        make_package(pkg, e, 4, false);
+        DatArchive ar1; CHECK(dat_parse_memory(pkg.data, pkg.size, ar1));
+        CHECK(build_texture_atlas(ar1, cl, four, 2, 16384, lay, &rgba) == 1);
+        const u8* p = atlas_texel(lay, rgba, WEAPON, cl[0], 10, 5);
+        CHECK(p && p[0] == 0 && p[1] == 0 && p[2] == 0);
+        free(rgba);
+    }
+
+    /* M_RESULT.DAT: the model's CLUT is on the row of another texture's
+       palette.  Its page keeps the palette stored after it. */
+    {
+        PkgEntry e[] = { { 1, skin.data, (u32)skin.size, 896, 0, 128, 256 },   { 2, pal_a.data, 512, 0, 511, 256, 1 },
+                         { 1, skin.data, (u32)skin.size, 896, 256, 128, 256 }, { 2, pal_b.data, 512, 0, 510, 256, 1 } };
+        Buffer pkg; make_package(pkg, e, 4, true);
+        DatArchive ar; CHECK(dat_parse_memory(pkg.data, pkg.size, ar));
+        u16 cl = clut_at(0, 511);
+        CHECK(build_texture_atlas(ar, &cl, is4, 1, 16384, lay, &rgba) == 1);
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, 7, 9), pal_colour(9000, tex_byte(7, 9))));
+        CHECK(is_colour(atlas_texel(lay, rgba, 0x008E, cl, 7, 9), pal_colour(100, tex_byte(7, 9))));
+        free(rgba);
+    }
+
+    /* Index 0.  0x0000 is never drawn.  0x8000 is black on an opaque face,
+       which is how DC2 draws its models; the DC1 atlas masks it. */
+    {
+        Buffer pal0; make_palette(pal0, 256, 100);
+        int zero = 0, one = 0;               /* texels whose byte is 0 and 1 */
+        while (tex_byte(zero, 0) != 0) zero++;
+        while (tex_byte(one, 0) != 1) one++;
+        put16(pal0, 0, 0x8000); put16(pal0, 2, 0x0000);
+        PkgEntry e[] = { { 1, skin.data, (u32)skin.size, 896, 256, 128, 256 },
+                         { 2, pal0.data, 512, 0, 511, 256, 1 } };
+        Buffer pkg; make_package(pkg, e, 2, true);
+        DatArchive ar; CHECK(dat_parse_memory(pkg.data, pkg.size, ar));
+        u16 cl = clut_at(0, 511);
+        CHECK(build_texture_atlas(ar, &cl, is4, 1, 16384, lay, &rgba) == 1);
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, zero, 0), 0x0000, 255));
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, one, 0), 0x0000, 0));
+        free(rgba);
+        make_package(pkg, e, 2, false);
+        DatArchive ar1; CHECK(dat_parse_memory(pkg.data, pkg.size, ar1));
+        CHECK(build_texture_atlas(ar1, &cl, is4, 1, 16384, lay, &rgba) == 1);
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, zero, 0), 0x0000, 0));
+        free(rgba);
+    }
+
+    /* No texture, and an archive with nothing at all */
+    {
+        PkgEntry e[] = { { 2, pal_a.data, 512, 0, 511, 256, 1 } };
+        Buffer pkg; make_package(pkg, e, 1, true);
+        DatArchive ar; CHECK(dat_parse_memory(pkg.data, pkg.size, ar));
+        u16 cl = clut_at(0, 511);
+        CHECK(build_texture_atlas(ar, &cl, is4, 1, 16384, lay, &rgba) == 0 && rgba == 0);
+    }
+}
+
+static void test_image_panel()
+{
+    /* Depth from the palette's shape */
+    CHECK(palette_bpp(32) == 4 && palette_bpp(64) == 4 && palette_bpp(96) == 4 && palette_bpp(128) == 4);
+    CHECK(palette_bpp(288) == 4 && palette_bpp(512) == 8 && palette_bpp(1536) == 8 && palette_bpp(0) == 8);
+
+    /* 64x136 in the header, 160 rows in the data: every tile is whole.
+       Un-tiled by 136 rows, the last tile row was read as 8-row tiles. */
+    Buffer weapon, pal_w, pal_a;
+    make_texture(weapon, 64, 160);
+    make_palette(pal_w, 48, 20000);
+    make_palette(pal_a, 256, 100);
+    Buffer out; out.resize(256 * 136 * 4);
+    render_texture(weapon.data, weapon.size, pal_w.data, pal_w.size, 64, 136, 4, out.data, true, 0, 2);
+    CHECK(is_colour(out.data + (5 * 256 + 10) * 4, pal_colour(20000, 32 + (tex_byte(5, 5) & 15))));
+    CHECK(is_colour(out.data + (130 * 256 + 201) * 4, pal_colour(20000, 32 + (tex_byte(100, 130) >> 4))));
+    CHECK(is_colour(out.data + (135 * 256 + 255) * 4, pal_colour(20000, 32 + (tex_byte(127, 135) >> 4))));
+    render_texture(weapon.data, weapon.size, pal_a.data, pal_a.size, 64, 136, 8, out.data, true, 0, 0);
+    CHECK(is_colour(out.data + (135 * 128 + 100) * 4, pal_colour(100, tex_byte(100, 135))));
+    CHECK(is_colour(out.data + (31 * 128 + 64) * 4, pal_colour(100, tex_byte(64, 31))));
+    /* A texture whose data is exactly its header's rows is unaffected */
+    render_texture(weapon.data, 128 * 128, pal_a.data, pal_a.size, 64, 128, 8, out.data, true, 0, 0);
+    CHECK(is_colour(out.data + (127 * 128 + 100) * 4, pal_colour(100, tex_byte(100, 127))));
+
+    /* A package's model gives its texture the depth and CLUT to show it
+       with: make_dcm's faces are on page (896, 256), 8bpp, CLUT (0, 511). */
+    static const PartSpec parts[] = { { 0, 0, 0, -1, 1, 1, 0 } };
+    Buffer dcm, lz, skin, pal_b;
+    make_dcm(dcm, parts, 1, 0x00630000);
+    CHECK(lzss_compress(dcm.data, dcm.size, lz));
+    make_texture(skin, 128, 256);
+    make_palette(pal_b, 256, 9000);
+    PkgEntry e[] = { { 2, pal_a.data, 512, 0, 510, 256, 1 }, { 2, pal_b.data, 512, 0, 511, 256, 1 },
+                     { 1, skin.data, (u32)skin.size, 896, 256, 128, 256 },
+                     { 5, lz.data, (u32)lz.size, 0, 0x63, 0, 0 } };
+    Buffer pkg; make_package(pkg, e, 4, true);
+    DatArchive ar; CHECK(dat_parse_memory(pkg.data, pkg.size, ar));
+    TexFaceUse* uses = 0;
+    int n = collect_texture_usage(ar, &uses);
+    CHECK(n == 1 && uses && uses[0].tpage == 0x009E && uses[0].clut == 0x7FC0 && uses[0].uv[1][0] == 12);
+    u8* img = 0; int w = 0, h = 0;
+    CHECK(render_texture_by_faces(skin.data, skin.size, 896, 256, 128, 256, uses, n, ar, &img, &w, &h));
+    CHECK(w == 256 && h == 256);
+    if (img) {
+        CHECK(is_colour(img + (13 * 256 + 12) * 4, pal_colour(9000, tex_byte(12, 13))));   /* on the face */
+        CHECK(img[(200 * 256 + 200) * 4 + 3] < 255);                                       /* dimmed elsewhere */
+    }
+    free(img);
+    free(uses);
 }
 
 int main()
@@ -798,6 +1058,8 @@ int main()
     test_routines_and_walk();
     test_scanners();
     test_model();
+    test_atlas();
+    test_image_panel();
     printf("%d checks, %d failed\n", g_checks, g_failed);
     return g_failed ? 1 : 0;
 }

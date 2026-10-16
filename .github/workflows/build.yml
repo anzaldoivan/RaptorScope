@@ -98,7 +98,7 @@ jobs:
           rc=0; ./dc1_export || rc=$?; test "$rc" -eq 2
       - name: Dino Crisis 2 unit tests
         run: |
-          g++ -std=c++11 -O2 -Wall -Iinclude -D_snprintf=snprintf tests/test_dc2.cpp src/formats/dat.cpp src/formats/dc2_room.cpp src/formats/dc2_scd.cpp src/formats/dc2_model.cpp src/core/lzss.cpp -o test_dc2
+          g++ -std=c++11 -O2 -Wall -Iinclude -D_snprintf=snprintf tests/test_dc2.cpp src/formats/dat.cpp src/formats/dc2_room.cpp src/formats/dc2_scd.cpp src/formats/dc2_model.cpp src/formats/texture.cpp src/formats/mesh.cpp src/core/lzss.cpp src/core/color.cpp -o test_dc2
           ./test_dc2
       - name: Dino Crisis 2 corpus tools skip without the game
         run: |

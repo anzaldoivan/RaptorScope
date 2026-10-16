@@ -274,6 +274,9 @@ def main():
     no_tex = sorted(set(x[0] for x in rows["MODEL"] if x[12] == "-1"))
     report.note("models", "no texture for the header's tpage in the model's own package (%d files; "
                 "E*.DAT use the .TEX of the same name): %s" % (len(no_tex), ", ".join(no_tex)))
+    other_pal = sorted(set(x[0] for x in rows["MODEL"] if x[12] != "-1" and x[14] not in ("-1", x[13])))
+    report.note("models", "header CLUT is not on the palette stored after the model's texture (%d files; "
+                "the atlas uses the stored one): %s" % (len(other_pal), ", ".join(other_pal) or "none"))
 
     # ---- music (K96): 32-byte records {4, size, track, flag, 16 x 0} ----
     mp3 = by_file("MP3")

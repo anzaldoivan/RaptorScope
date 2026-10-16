@@ -179,9 +179,17 @@ static void package(const char* dirpath, const char* name)
                 bool ok = dc2_parse_model(dec.data, dec.size, e.load_base, m);
                 int tex = -1, pal = -1;
                 dc2_model_texture(a, mi.tpage, mi.clut, tex, pal);
-                printf("MODEL\t%s\t%d\t%d\t%d\t%d\t%d\t%08x\t%04x\t%04x\t%d\t%d\t%d\t%d\t%d\n", name, i,
+                /* The palette stored after the texture, with no other
+                   texture between: the one the atlas gives it */
+                int own = -1;
+                for (int j = tex + 1; tex >= 0 && j < a.count && own < 0; j++) {
+                    u32 t = a.entries[j].type;
+                    if (t == DAT_PALETTE) own = j;
+                    else if (t == DAT_TEXTURE || t == DAT_LZSS1) break;
+                }
+                printf("MODEL\t%s\t%d\t%d\t%d\t%d\t%d\t%08x\t%04x\t%04x\t%d\t%d\t%d\t%d\t%d\t%d\n", name, i,
                        mi.parts, mi.verts, mi.tris, mi.quads, e.load_base, mi.tpage, mi.clut,
-                       ok ? 1 : 0, m.mesh.vert_count, m.mesh.tri_count, tex, pal);
+                       ok ? 1 : 0, m.mesh.vert_count, m.mesh.tri_count, tex, pal, own);
             }
             room(name, dec.data, dec.size, e.load_base);
         }
