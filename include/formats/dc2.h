@@ -1,9 +1,10 @@
 /*═══════════════════════════════════════════════════════════════════
  *  RaptorScope  -  Dino Crisis 2 (PC) Formats
  *
- *  Rooms (12-slot section directory, collision, zones), the room
- *  script VM, and DCM models with their textures.  The packages
- *  themselves are read by dat.cpp (DatArchive::is_dc2).
+ *  Rooms (12-slot section directory, collision, cameras, zones), their
+ *  ST*.DBS backgrounds, the room script VM, and DCM models with their
+ *  textures.  The packages themselves are read by dat.cpp
+ *  (DatArchive::is_dc2).
  *
  *  Format facts come from the dinorand project's Dino Crisis 2
  *  research and are cited by its registry row (K<n>) or document.
@@ -22,13 +23,13 @@
  *
  *  A room is the LZSS0 entry of ST*.DAT.  Decompressed, it starts with
  *  12 absolute pointers (K20, ROOM-SECTION-TABLE.md):
- *    [0] draw mesh            [6]  camera-switch zones
+ *    [0] draw mesh            [6]  sound zones
  *    [1] markers              [7]  zones
  *    [2] collision polygons   [8]  prop geometry
- *    [3] cameras              [9]  16-byte block
- *    [4] optional table       [10] unknown
+ *    [3] camera-switch zones  [9]  camera table
+ *    [4] optional table       [10] .DBS directory (one background per camera)
  *    [5] script               [11] end of the blob
- *  Only slots 1, 2, 5 and 7 are decoded here.
+ *  Slots 0, 4 and 8 are not decoded here (slots 3, 6, 9, 10: K143-K146).
  *═══════════════════════════════════════════════════════════════════*/
 #define DC2_ROOM_SLOTS 12
 
@@ -79,6 +80,96 @@ struct Dc2Zone {
 };
 int dc2_room_zones(const u8* dec, size_t dec_size, const Dc2RoomDir& dir,
                    Dc2Zone* out, int max_out);
+
+/*─── Slot 9 and 10: cameras and their backgrounds ───────────────*/
+struct Dc2Camera {
+    s16 eye[3];         /* +0   game coordinates, y down                  */
+    u16 proj;           /* +6   projection distance, on a 320x240 screen  */
+    s16 target[3];      /* +8                                             */
+    s16 roll;           /* +14  0 in 1133 of the 1169 cameras             */
+    u32 dbs_off;        /* slot 10: offset of the camera's package in ST*.DBS */
+    u32 dbs_size;       /*          and its size; 0 when slot 10 has no record */
+};
+int dc2_room_cameras(const u8* dec, size_t dec_size, const Dc2RoomDir& dir,
+                     Dc2Camera* out, int max_out);
+
+/* Screen position (0..320, 0..240) of a point in game coordinates, as the
+   game projects it.  False when the point is not in front of the camera. */
+bool dc2_camera_project(const Dc2Camera& cam, const f32 p[3], f32 screen[2]);
+
+/*─── Slot 3: camera-switch zones (44-byte records) ──────────────*/
+struct Dc2CamZone {
+    u8  flags;          /* +0   0x80 = off                                */
+    u8  camera;         /* +4   camera the zone switches to               */
+    u8  b5;             /* +5   unknown                                   */
+    u8  floor, span;    /* +6   the player's floor must be in [floor, floor + span] */
+    s16 w8[2];          /* +8   unknown                                   */
+    s16 x[4], z[4];     /* +12  trigger quad                              */
+    s16 vx[4], vz[4];   /* +28  second quad, tested for other actors under that camera */
+};
+int dc2_room_cam_zones(const u8* dec, size_t dec_size, const Dc2RoomDir& dir,
+                       Dc2CamZone* out, int max_out);
+
+/*─── Slot 6: sound zones (20-byte records) ──────────────────────*/
+struct Dc2SoundZone {
+    u8  b0, on;         /* +0, +1                                         */
+    s8  floor;          /* +2                                             */
+    u8  b3;             /* +3                                             */
+    s16 x[4], z[4];     /* +4   four (x, z) corners                       */
+};
+int dc2_room_sound_zones(const u8* dec, size_t dec_size, const Dc2RoomDir& dir,
+                         Dc2SoundZone* out, int max_out);
+
+/*═══════════════════════════════════════════════════════════════════
+ *  Backgrounds (ST*.DBS, K142)
+ *
+ *  The file is one package per camera of the room, laid end to end
+ *  (DatArchive::n_packages).  A package is:
+ *    entry 0  type 0  mask table: u32 count, then per tile
+ *                     {u8 tile_x, u8 tile_y, s16 depth}
+ *    entry 1  type 0  a JFIF picture, 320x240
+ *  and then nothing, or
+ *    entry 2  type 2  palette at VRAM (0, 496)
+ *    entry 3  type 0  the mask tiles' pixels, LZSS (the header's load
+ *                     address field holds the unpacked size): one 18x18
+ *                     cell of 16-bit pixels per table record, the 16x16
+ *                     tile and a 1-pixel border, opaque where 0x8000 is set
+ *          or type 8  an 8-bit picture for VRAM (320, 0), stored row by
+ *                     row; these packages have no mask tiles
+ *═══════════════════════════════════════════════════════════════════*/
+#define DC2_BG_W 320
+#define DC2_BG_H 240
+#define DC2_MASK_CELL 18
+#define DC2_MAX_MASK_TILES 1024     /* the largest table has 416 */
+
+enum { DC2_BG_PLAIN = 0, DC2_BG_MASKED = 1, DC2_BG_PICTURE = 2 };
+
+struct Dc2Background {
+    int first;          /* archive index of the package's entry 0 */
+    int kind;           /* DC2_BG_*: what follows the picture     */
+    int n_tiles;        /* mask table count                       */
+    u32 offset;         /* of the package in the file             */
+    int w, h;           /* the JPEG's size, from its frame header */
+};
+/* Describe package number `package` of a .DBS.  False when it is not a
+   background: the entry types differ or entry 1 is not a JPEG. */
+bool dc2_background(const DatArchive& archive, int package, Dc2Background& bg);
+/* The package at a file offset (Dc2Camera::dbs_off), -1 when none starts there */
+int  dc2_background_at(const DatArchive& archive, u32 offset);
+
+/* Width and height from a JPEG's frame header; the picture itself is
+   decoded by the UI. */
+bool dc2_jpeg_size(const u8* jpeg, size_t size, int& w, int& h);
+
+struct Dc2MaskTile { s16 x, y, depth; };    /* pixel position on the picture */
+int  dc2_mask_tiles(const u8* table, size_t size, Dc2MaskTile* out, int max_out);
+/* Unpack entry 3 of a DC2_BG_MASKED package */
+bool dc2_mask_cells(const DatEntry& entry, Buffer& cells);
+/* Draw the opaque pixels of each tile's inner 16x16 onto a 320x240 RGBA
+   picture.  tint (RGB, or 0 for none) is mixed in half and half, to tell
+   the tiles from the picture they were cut from. */
+void dc2_mask_draw(const Dc2MaskTile* tiles, int n_tiles, const u8* cells, size_t cells_size,
+                   u8* rgba, const u8* tint);
 
 /*═══════════════════════════════════════════════════════════════════
  *  Room script (slot 5)
@@ -184,11 +275,18 @@ bool dc2_scd_disassemble(const u8* dec, size_t dec_size, u32 base, ScdDisasm& ou
    pick the viewer's existing zone colours. */
 enum { DC2_ZONE_TRIGGER = 1, DC2_ZONE_ITEM = 2, DC2_ZONE_DOOR = 4 };
 
-/* Fill the overlay from slots 1, 2, 7 and the script: collision polygons
-   (polys), slot-7 zones (floor zones), doors, triggers and item pickups
-   (trigger zones, arg = destination / routine / item id, -1 when the
-   script computes it), spawns (items) and markers (enemies).  Records
-   whose position is not a literal are left out. */
+/* Fill the overlay from slots 1, 2, 3, 6, 7, 9, 10 and the script:
+   collision polygons (polys), slot-7 zones (floor zones), slot-6 sound
+   zones (RDT_ZONE_SOUND), doors, triggers and item pickups (trigger zones,
+   arg = destination / routine / item id, -1 when the script computes it),
+   spawns (items), markers (enemies) and cameras.  Records whose position
+   is not a literal are left out.
+
+   Cameras go in cam_threads, one per camera-switch zone and one (no_zone)
+   for each camera no zone names, so the viewer's camera list, shot view
+   and zone drawing work as for DC1: desc is written as a DC1 fixed shot
+   (type 1, target at +0x2C, eye at +0x34), and the DC2 fields of
+   CamThread carry the rest. */
 bool dc2_room_overlay(const u8* dec, size_t dec_size, u32 base, RdtSceneOverlay& overlay);
 
 /* The room's draw mesh is not decoded, so there is nothing to show but

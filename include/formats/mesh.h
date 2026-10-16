@@ -323,7 +323,8 @@ const char* get_bone_name(int bone_count, int bone_idx);
  *═══════════════════════════════════════════════════════════════════*/
 
 /*─── Zone: a ptr[6] floor zone or an SCD 0x28 trigger zone ─────*/
-enum { RDT_ZONE_FLOOR = 0, RDT_ZONE_TRIGGER = 1 };
+enum { RDT_ZONE_FLOOR = 0, RDT_ZONE_TRIGGER = 1,
+       RDT_ZONE_SOUND = 2 };  /* DC2 slot 6; listed with the floor zones, collision_group = floor */
 
 struct RdtFloorZone {
     s16 x[4], z[4];          /* 4 corner XZ coords (world-space) */
@@ -487,8 +488,16 @@ struct RdtSceneOverlay {
         u8  type;             /* thread type (byte[0]) */
         u8  cam_id;           /* camera ID (byte[2]) */
         u8  desc[68];         /* whole descriptor, for rdt_camera_shot */
+        /* Dino Crisis 2 only (dc2_room_overlay); zero in a DC1 room */
+        u8  floor, floor_span; /* the zone holds for player floors floor..floor+span */
+        u8  zflags;           /* zone record byte +0, 0x80 = off */
+        u8  no_zone;          /* 1: no zone names this camera, the quad is empty */
+        u16 proj;             /* projection distance (DC1 always uses 320) */
+        s16 roll;
+        u32 dbs_off, dbs_size; /* the camera's background package in ST*.DBS */
     };
-    CamThread  cam_threads[32]; int n_cam_threads;
+    /* A DC1 room fills at most 32; DC2's ST503 has 47 cameras */
+    CamThread  cam_threads[64]; int n_cam_threads;
 
     /* Camera setups.  When the game switches to camera N (a ptr[3]
        cam_id) it runs script thread N, which shows or hides model slots
@@ -504,7 +513,7 @@ struct RdtSceneOverlay {
     /* Viewer Y of the floor under each flat shape (from mesh data), set by
        overlay_floor_heights; floor_y is the room-wide floor. */
     f32 floor_y;
-    f32 zone_y[64], rect_y[256], camcut_y[128], cam_thread_y[32];
+    f32 zone_y[64], rect_y[256], camcut_y[128], cam_thread_y[64];
 
     RdtSceneOverlay() { memset(this, 0, sizeof(*this)); }
 };

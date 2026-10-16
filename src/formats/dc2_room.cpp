@@ -1,15 +1,19 @@
 /*═══════════════════════════════════════════════════════════════════
  *  RaptorScope  -  Dino Crisis 2 Rooms
  *
- *  The 12-slot section directory of an ST*.DAT room blob, the three
+ *  The 12-slot section directory of an ST*.DAT room blob, the
  *  sections whose records are decoded (1 markers, 2 collision
- *  polygons, 7 zones), and the scene overlay built from them and from
- *  the room script.
+ *  polygons, 3 camera-switch zones, 6 sound zones, 7 zones, 9 cameras,
+ *  10 background directory), the scene overlay built from them and
+ *  from the room script, and the backgrounds of ST*.DBS.
  *
- *  Sources: dinorand ROOM-SECTION-TABLE.md (K20) and its tools
- *  label_sections.py, decode_s1_s7.py and decode_s2.py.
+ *  Sources: dinorand ROOM-SECTION-TABLE.md (K20, K141-K152) and its
+ *  tools label_sections.py, decode_s1_s7.py, decode_s2.py,
+ *  decode_cameras.py and decode_dbs.py.
  *═══════════════════════════════════════════════════════════════════*/
 #include "formats/dc2.h"
+#include "core/lzss.h"
+#include <math.h>
 #include <string.h>
 
 /*─── Section directory ──────────────────────────────────────────*/
@@ -45,13 +49,13 @@ bool dc2_room_directory(const u8* dec, size_t dec_size, u32 base, Dc2RoomDir& di
 
 const char* dc2_room_slot_name(int slot)
 {
-    /* Labels from ROOM-SECTION-TABLE.md.  Slots 4, 9 and 10 have no
-       established meaning (K137), and 1 and 7 no established purpose. */
+    /* Labels from ROOM-SECTION-TABLE.md.  Slot 4 has no established
+       meaning (K137), and 1 and 7 no established purpose. */
     static const char* names[DC2_ROOM_SLOTS] = {
         "Draw mesh (not decoded)", "Markers", "Collision polygons",
-        "Cameras (not decoded)", "Table (unknown)", "Script",
-        "Camera-switch zones (not decoded)", "Zones",
-        "Prop geometry (not decoded)", "Block (unknown)", "Unknown", "End"
+        "Camera-switch zones", "Table (unknown)", "Script",
+        "Sound zones", "Zones",
+        "Prop geometry (not decoded)", "Cameras", "Background directory", "End"
     };
     return (slot >= 0 && slot < DC2_ROOM_SLOTS) ? names[slot] : "";
 }
@@ -171,6 +175,222 @@ int dc2_room_zones(const u8* dec, size_t dec_size, const Dc2RoomDir& dir,
     return n;
 }
 
+/*─── Slot 9 and 10: cameras and their backgrounds ───────────────*/
+
+/* Slot 9: a 16-byte header {u32 ?, u16 count, u16 0x1ADA, 8 bytes}, then
+   one 16-byte record per camera.  The count equals the number of packages
+   in the room's .DBS in all 89 rooms; 21 rooms have bytes after the
+   records, which are not read.  Slot 10 has one {u32 sector, u32 bytes}
+   per camera: its package in the .DBS starts at sector x 0x800, so camera
+   i shows background i (K143, K145; ST101 has 6 cameras). */
+int dc2_room_cameras(const u8* dec, size_t dec_size, const Dc2RoomDir& dir,
+                     Dc2Camera* out, int max_out)
+{
+    if (!dir.present[9] || dir.size[9] < 16) return 0;
+    size_t o = dir.off[9], size = dir.size[9];
+    if (o + size > dec_size || rd_u16(dec + o + 6) != 0x1ADA) return 0;
+    int count = rd_u16(dec + o + 4), n = 0;
+    size_t dbs = dir.present[10] && dir.off[10] + dir.size[10] <= dec_size ? dir.size[10] : 0;
+    for (int i = 0; i < count && n < max_out; i++) {
+        size_t r = 16 + 16 * (size_t)i;
+        if (r + 16 > size) break;
+        const u8* p = dec + o + r;
+        Dc2Camera& c = out[n++];
+        for (int k = 0; k < 3; k++) {
+            c.eye[k]    = rd_s16(p + k * 2);
+            c.target[k] = rd_s16(p + 8 + k * 2);
+        }
+        c.proj = rd_u16(p + 6);
+        c.roll = rd_s16(p + 14);
+        c.dbs_off = c.dbs_size = 0;
+        if ((size_t)i * 8 + 8 <= dbs) {
+            c.dbs_off  = rd_u32(dec + dir.off[10] + i * 8) * DAT_SECTOR;
+            c.dbs_size = rd_u32(dec + dir.off[10] + i * 8 + 4);
+        }
+    }
+    return n;
+}
+
+/* The game's projection, y down: forward is eye to target, right is
+   down x forward, and the screen centre is (160, 120).  By eye it fits
+   ST101's camera 0 and ST102's camera 2.  Roll turns the picture about the
+   forward axis in units of 4096 a turn; it is 0 in all but 36 cameras and
+   its sign has not been checked against the game. */
+bool dc2_camera_project(const Dc2Camera& cam, const f32 p[3], f32 screen[2])
+{
+    f32 f[3], v[3];
+    for (int k = 0; k < 3; k++) {
+        f[k] = (f32)(cam.target[k] - cam.eye[k]);
+        v[k] = p[k] - (f32)cam.eye[k];
+    }
+    f32 fl = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+    if (fl < 1e-3f) return false;
+    for (int k = 0; k < 3; k++) f[k] /= fl;
+    f32 r[3] = { f[2], 0, -f[0] };                  /* (0, 1, 0) x forward */
+    f32 rl = sqrtf(r[0] * r[0] + r[2] * r[2]);
+    if (rl < 1e-6f) { r[0] = 1; r[2] = 0; rl = 1; } /* looking straight up or down */
+    r[0] /= rl; r[2] /= rl;
+    f32 d[3] = { f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0] };
+    f32 z = v[0] * f[0] + v[1] * f[1] + v[2] * f[2];
+    if (z < 1e-3f) return false;
+    f32 x = (v[0] * r[0] + v[1] * r[1] + v[2] * r[2]) * cam.proj / z;
+    f32 y = (v[0] * d[0] + v[1] * d[1] + v[2] * d[2]) * cam.proj / z;
+    f32 a = cam.roll * (6.2831853f / 4096.0f);
+    screen[0] = 160 + x * cosf(a) - y * sinf(a);
+    screen[1] = 120 + x * sinf(a) + y * cosf(a);
+    return true;
+}
+
+/*─── Slot 3: camera-switch zones ────────────────────────────────*/
+
+/* u32 count, then 44-byte records.  The game walks them in order with the
+   player's position; the first zone that holds the player, and whose floor
+   range holds the player's floor, selects the camera (K144).  An actor's
+   floor is -y / 1000 of the ground under it, so floor 8 is ST100's roof.
+   The script can also force a camera (op 0x4A), which is how 412 of the
+   485 cameras no zone names are reached. */
+int dc2_room_cam_zones(const u8* dec, size_t dec_size, const Dc2RoomDir& dir,
+                       Dc2CamZone* out, int max_out)
+{
+    if (!dir.present[3] || dir.size[3] < 4) return 0;
+    size_t o = dir.off[3], size = dir.size[3];
+    if (o + size > dec_size) return 0;
+    u32 count = rd_u32(dec + o);
+    int n = 0;
+    for (u32 i = 0; i < count && n < max_out; i++) {
+        if (4 + 44 * ((size_t)i + 1) > size) break;
+        const u8* r = dec + o + 4 + 44 * (size_t)i;
+        Dc2CamZone& z = out[n++];
+        z.flags = r[0]; z.camera = r[4]; z.b5 = r[5]; z.floor = r[6]; z.span = r[7];
+        z.w8[0] = rd_s16(r + 8); z.w8[1] = rd_s16(r + 10);
+        for (int c = 0; c < 4; c++) {
+            z.x[c]  = rd_s16(r + 12 + c * 4); z.z[c]  = rd_s16(r + 14 + c * 4);
+            z.vx[c] = rd_s16(r + 28 + c * 4); z.vz[c] = rd_s16(r + 30 + c * 4);
+        }
+    }
+    return n;
+}
+
+/*─── Slot 6: sound zones ────────────────────────────────────────*/
+
+/* u32 count, then 20-byte records, read by the sound-effect code (K146);
+   they do not switch cameras.  ST40A has 16. */
+int dc2_room_sound_zones(const u8* dec, size_t dec_size, const Dc2RoomDir& dir,
+                         Dc2SoundZone* out, int max_out)
+{
+    if (!dir.present[6] || dir.size[6] < 4) return 0;
+    size_t o = dir.off[6], size = dir.size[6];
+    if (o + size > dec_size) return 0;
+    u32 count = rd_u32(dec + o);
+    int n = 0;
+    for (u32 i = 0; i < count && n < max_out; i++) {
+        if (4 + 20 * ((size_t)i + 1) > size) break;
+        const u8* r = dec + o + 4 + 20 * (size_t)i;
+        Dc2SoundZone& z = out[n++];
+        z.b0 = r[0]; z.on = r[1]; z.floor = (s8)r[2]; z.b3 = r[3];
+        for (int c = 0; c < 4; c++) {
+            z.x[c] = rd_s16(r + 4 + c * 4);
+            z.z[c] = rd_s16(r + 6 + c * 4);
+        }
+    }
+    return n;
+}
+
+/*─── Backgrounds (ST*.DBS) ──────────────────────────────────────*/
+
+bool dc2_jpeg_size(const u8* j, size_t n, int& w, int& h)
+{
+    if (!j || n < 4 || j[0] != 0xFF || j[1] != 0xD8) return false;
+    for (size_t i = 2; i + 9 < n; ) {
+        if (j[i] != 0xFF) return false;
+        if (j[i + 1] == 0xC0 || j[i + 1] == 0xC2) {     /* frame header */
+            h = (j[i + 5] << 8) | j[i + 6];
+            w = (j[i + 7] << 8) | j[i + 8];
+            return true;
+        }
+        i += 2 + (((size_t)j[i + 2] << 8) | j[i + 3]);
+    }
+    return false;
+}
+
+/* The shapes in the 1169 packages of the game, by entry type: (0, 0) 361
+   times, (0, 0, 2, 0) 779 and (0, 0, 2, 8) 29. */
+bool dc2_background(const DatArchive& a, int package, Dc2Background& bg)
+{
+    memset(&bg, 0, sizeof(bg));
+    int first = -1, n = 0;
+    for (int i = 0; i < a.count; i++)
+        if (a.entries[i].package == package) { if (first < 0) first = i; n++; }
+    if (!a.is_dc2 || (n != 2 && n != 4)) return false;
+    const DatEntry* e = a.entries + first;
+    if (e[0].raw_type != 0 || e[1].raw_type != 0 || !e[0].data || e[0].size < 4) return false;
+    if (!dc2_jpeg_size(e[1].data, e[1].size, bg.w, bg.h)) return false;
+    if (n == 4) {
+        if (e[2].raw_type != 2 || (e[3].raw_type != 0 && e[3].raw_type != 8)) return false;
+        bg.kind = e[3].raw_type == 0 ? DC2_BG_MASKED : DC2_BG_PICTURE;
+    }
+    bg.first = first;
+    bg.n_tiles = (int)rd_u32(e[0].data);
+    bg.offset = e[0].offset - DAT_SECTOR;
+    return true;
+}
+
+int dc2_background_at(const DatArchive& a, u32 offset)
+{
+    for (int i = 0; i < a.count; i++)
+        if (a.entries[i].offset == offset + DAT_SECTOR &&
+            (i == 0 || a.entries[i - 1].package != a.entries[i].package))
+            return a.entries[i].package;
+    return -1;
+}
+
+/* The game reads x = byte 0 << 4 and y = (byte 1 & 0xF) << 4 (reader
+   0x4036F0 in dinorand's notes); what the high nibble of byte 1 is for is
+   not known. */
+int dc2_mask_tiles(const u8* t, size_t size, Dc2MaskTile* out, int max_out)
+{
+    if (!t || size < 4) return 0;
+    u32 count = rd_u32(t);
+    int n = 0;
+    for (u32 i = 0; i < count && n < max_out; i++) {
+        if (4 + 4 * ((size_t)i + 1) > size) break;
+        const u8* r = t + 4 + 4 * (size_t)i;
+        Dc2MaskTile& m = out[n++];
+        m.x = (s16)(r[0] * 16);
+        m.y = (s16)((r[1] & 0xF) * 16);
+        m.depth = rd_s16(r + 2);
+    }
+    return n;
+}
+
+bool dc2_mask_cells(const DatEntry& entry, Buffer& cells)
+{
+    return entry.data && lzss_decompress(entry.data, entry.size, cells);
+}
+
+void dc2_mask_draw(const Dc2MaskTile* tiles, int n_tiles, const u8* cells, size_t cells_size,
+                   u8* rgba, const u8* tint)
+{
+    const size_t cell = DC2_MASK_CELL * DC2_MASK_CELL * 2;
+    for (int i = 0; i < n_tiles && ((size_t)i + 1) * cell <= cells_size; i++) {
+        for (int y = 0; y < 16; y++) {
+            for (int x = 0; x < 16; x++) {
+                int px = tiles[i].x + x, py = tiles[i].y + y;
+                if (px < 0 || px >= DC2_BG_W || py < 0 || py >= DC2_BG_H) continue;
+                u16 c = rd_u16(cells + (size_t)i * cell + ((y + 1) * DC2_MASK_CELL + x + 1) * 2);
+                if (!(c & 0x8000)) continue;
+                u8* o = rgba + ((size_t)py * DC2_BG_W + px) * 4;
+                for (int k = 0; k < 3; k++) {
+                    int v = (c >> (5 * k)) & 31;
+                    v = (v << 3) | (v >> 2);
+                    o[k] = (u8)(tint ? (v + tint[k]) / 2 : v);
+                }
+                o[3] = 255;
+            }
+        }
+    }
+}
+
 /*─── Overlay ────────────────────────────────────────────────────*/
 
 /* Add a zone from eight script operands (x0 z0 .. x3 z3).  A zone whose
@@ -228,6 +448,58 @@ bool dc2_room_overlay(const u8* dec, size_t dec_size, u32 base, RdtSceneOverlay&
         memcpy(z.z, zones[i].z, sizeof(z.z));
         z.kind = RDT_ZONE_FLOOR;
         z.target_index = (u8)i;
+    }
+
+    /* Slot 6: sound zones, listed with the floor zones */
+    Dc2SoundZone snd[64];
+    n = dc2_room_sound_zones(dec, dec_size, dir, snd, 64);
+    for (int i = 0; i < n && ov.n_zones < 64; i++) {
+        RdtFloorZone& z = ov.zones[ov.n_zones++];
+        memset(&z, 0, sizeof(z));
+        memcpy(z.x, snd[i].x, sizeof(z.x));
+        memcpy(z.z, snd[i].z, sizeof(z.z));
+        z.kind = RDT_ZONE_SOUND;
+        z.target_index = (u8)i;
+        z.collision_group = (u8)snd[i].floor;
+        z.flags = snd[i].on;
+    }
+
+    /* Slots 9, 10 and 3: cameras.  One thread per camera-switch zone, in
+       the order the game tests them, then one for each camera no zone
+       names. */
+    Dc2Camera cams[64];
+    int n_cams = dc2_room_cameras(dec, dec_size, dir, cams, 64);
+    Dc2CamZone cz[64];
+    int n_cz = dc2_room_cam_zones(dec, dec_size, dir, cz, 64);
+    bool named[64] = {};
+    const int max_threads = (int)(sizeof(ov.cam_threads) / sizeof(ov.cam_threads[0]));
+    for (int i = 0; i < n_cz + n_cams && ov.n_cam_threads < max_threads; i++) {
+        int cam = i < n_cz ? cz[i].camera : i - n_cz;
+        if (cam >= n_cams || (i >= n_cz && named[cam])) continue;
+        named[cam] = true;
+        const Dc2Camera& c = cams[cam];
+        RdtSceneOverlay::CamThread& ct = ov.cam_threads[ov.n_cam_threads++];
+        ct.type = 1;
+        ct.cam_id = (u8)cam;
+        ct.desc[0] = 1;                 /* a DC1 fixed shot, for rdt_camera_shot */
+        ct.desc[2] = (u8)cam;
+        for (int k = 0; k < 3; k++) {
+            wr_u16(ct.desc + 0x2C + k * 2, (u16)c.target[k]);
+            wr_u16(ct.desc + 0x34 + k * 2, (u16)c.eye[k]);
+        }
+        ct.proj = c.proj;
+        ct.roll = c.roll;
+        ct.dbs_off = c.dbs_off;
+        ct.dbs_size = c.dbs_size;
+        if (i < n_cz) {
+            memcpy(ct.x, cz[i].x, sizeof(ct.x));
+            memcpy(ct.z, cz[i].z, sizeof(ct.z));
+            ct.floor = cz[i].floor;
+            ct.floor_span = cz[i].span;
+            ct.zflags = cz[i].flags;
+        } else {
+            ct.no_zone = 1;
+        }
     }
 
     /* Script: doors (0x30), triggers (0x31), item pickups (0x35) */
