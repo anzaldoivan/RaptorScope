@@ -618,6 +618,7 @@ extern WeaponPanel g_weapon;
  *  SCD Disassembler Panel
  *═══════════════════════════════════════════════════════════════════*/
 #include "formats/scd.h"
+#include "formats/dc2.h"
 
 struct ScdPanel {
     HWND        hwnd;
@@ -654,6 +655,7 @@ struct ScdPanel {
     ~ScdPanel() { disasm.clear(); }
 
     bool load(const u8* rdt_data, size_t rdt_size, u32 base_addr);
+    bool load_dc2(const u8* room, size_t room_size, u32 base_addr);
     void paint(HDC hdc, RECT& rc);
     void on_scroll(int delta);
     void on_click(int y);

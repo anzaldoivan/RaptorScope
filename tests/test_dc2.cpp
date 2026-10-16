@@ -365,6 +365,24 @@ static void test_slot2()
     CHECK(memcmp(blob.data + p[1].pts_off, blob.data + p[1].pts_off + 25 * 4, 4) == 0);   /* closed */
     CHECK(rd_s16(blob.data + p[1].pts_off) == -3000);
 
+    /* Overlay: the polygons without their closing point, and the outline
+       mesh the viewer frames (one zero-area triangle per edge) */
+    {
+        RdtSceneOverlay* ov = new RdtSceneOverlay();
+        CHECK(dc2_room_overlay(blob.data, blob.size, BASE, *ov));
+        CHECK(ov->n_polys == 3 && ov->n_poly_pts == 4 + 25 + 3);
+        CHECK(ov->polys[1].first == 4 && ov->polys[1].count == 25 && ov->polys[0].flags == 0x41);
+        CHECK(ov->poly_pts[0][0] == 1000 && ov->poly_pts[1][0] == 1100 && ov->poly_pts[1][1] == -7);
+        Mesh outline;
+        dc2_room_outline_mesh(*ov, outline);
+        CHECK(outline.vert_count == 32 && outline.tri_count == 32);
+        CHECK(outline.verts[1].x == -1100.0f && outline.verts[1].y == 0.0f && outline.verts[1].z == -7.0f);
+        CHECK(outline.tris[0].idx[0] == 0 && outline.tris[0].idx[1] == 1 && outline.tris[0].idx[2] == 1);
+        CHECK(outline.tris[3].idx[0] == 3 && outline.tris[3].idx[1] == 0);     /* last edge closes the loop */
+        CHECK(outline.tris[28].idx[1] == 4 && outline.tris[31].idx[1] == 29);
+        delete ov;
+    }
+
     /* More records than the caller has room for: clamped, nothing past the array */
     Dc2Polygon two[3];
     memset(two, 0xEE, sizeof(two));

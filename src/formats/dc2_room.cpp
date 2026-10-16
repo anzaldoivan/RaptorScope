@@ -270,3 +270,21 @@ bool dc2_room_overlay(const u8* dec, size_t dec_size, u32 base, RdtSceneOverlay&
     }
     return true;
 }
+
+void dc2_room_outline_mesh(const RdtSceneOverlay& ov, Mesh& mesh)
+{
+    mesh.alloc(ov.n_poly_pts, ov.n_poly_pts);
+    int n = 0;
+    for (int i = 0; i < ov.n_polys; i++) {
+        const RdtPoly& p = ov.polys[i];
+        for (int k = 0; k < p.count; k++, n++) {
+            const s16* pt = ov.poly_pts[p.first + k];
+            mesh.verts[n].x = -(f32)pt[0];      /* viewer x is -x, as for the overlay */
+            mesh.verts[n].z = (f32)pt[1];
+            u32 next = (u32)(p.first + (k + 1) % p.count);
+            MeshTri& t = mesh.tris[n];
+            t.idx[0] = (u32)n; t.idx[1] = next; t.idx[2] = next;
+            t.color = RGBA8(0, 204, 51, 255);
+        }
+    }
+}

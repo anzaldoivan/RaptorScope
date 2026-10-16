@@ -410,10 +410,12 @@ void ImagePanel::render_entry(const DatEntry& tex, const DatEntry* pal, bool do_
     if (!tex.data || tex.size == 0) return;
     const u8* pix = tex.data; size_t pix_size = tex.size;
     Buffer dec;
-    if (tex.type == DAT_LZSS1) {
+    if (tex.type == DAT_LZSS1 || tex.type == DAT_DC2_LZSS2) {
         if (lzss_decompress(tex.data, tex.size, dec))
             { pix = dec.data; pix_size = dec.size; }
     }
+    /* DC2 type 8 (the sprites of ST000.DBS) is stored row by row */
+    if (tex.type == DAT_DC2_LZSS2) do_deswizzle = false;
 
     /* Decode the way the archive's faces sample this texture, if any do */
     if (face_cluts && do_deswizzle && g_app.archive && !g_app.archive->is_item_bank &&
@@ -2543,6 +2545,23 @@ static void ov_draw_rect(const RdtSceneOverlay& ov, int i) {
     if (s_ov_hl) ov_pin((x0 + x1) * 0.5f, ry, (z0 + z1) * 0.5f);
 }
 
+/* Dino Crisis 2 collision polygons (room slot 2): green outline, drawn
+   on the room's floor plane */
+static void ov_draw_poly(const RdtSceneOverlay& ov, int i) {
+    ov_width(2.0f);
+    ov_color(0.0f, 0.8f, 0.2f);
+    const RdtPoly& p = ov.polys[i];
+    f32 cx = 0, cz = 0;
+    glBegin(GL_LINE_LOOP);
+    for (int k = 0; k < p.count; k++) {
+        const s16* pt = ov.poly_pts[p.first + k];
+        glVertex3f(-(f32)pt[0], ov.floor_y, (f32)pt[1]);
+        cx += -(f32)pt[0]; cz += (f32)pt[1];
+    }
+    glEnd();
+    if (s_ov_hl && p.count) ov_pin(cx / p.count, ov.floor_y, cz / p.count);
+}
+
 /* Script cameras (0x4C, 0x2E): blue eye → red target */
 static void ov_draw_script_cam(const RdtSceneOverlay& ov, int i) {
     const RdtCameraEntry& cam = ov.cameras[i];
@@ -2764,7 +2783,9 @@ static void ov_draw(const RdtSceneOverlay& ov, int type, int i) {
     switch (type) {
     case OverlayVis::TRIGGERS:
     case OverlayVis::FLOOR_ZONES: if (i < ov.n_zones) ov_draw_zone(ov, i); break;
-    case OverlayVis::RECTS:       if (i < ov.n_collisions) ov_draw_rect(ov, i); break;
+    case OverlayVis::RECTS:       if (i < ov.n_collisions) ov_draw_rect(ov, i);
+                                  else if (i - ov.n_collisions < ov.n_polys) ov_draw_poly(ov, i - ov.n_collisions);
+                                  break;
     case OverlayVis::SCRIPT_CAMS: if (i < ov.n_cameras) ov_draw_script_cam(ov, i); break;
     case OverlayVis::SPAWNS:      if (i < ov.n_spawns) ov_draw_spawn(ov, i); break;
     case OverlayVis::CHARS:       if (i < ov.n_chars) ov_draw_char(ov, i); break;
@@ -2807,7 +2828,7 @@ static void build_overlay_list(int list_id, const RdtSceneOverlay& ov, const Ove
             }
             continue;
         }
-        int n = t == OverlayVis::RECTS ? ov.n_collisions : t == OverlayVis::SCRIPT_CAMS ? ov.n_cameras :
+        int n = t == OverlayVis::RECTS ? ov.n_collisions + ov.n_polys : t == OverlayVis::SCRIPT_CAMS ? ov.n_cameras :
                 t == OverlayVis::SPAWNS ? ov.n_spawns : t == OverlayVis::CHARS ? ov.n_chars :
                 t == OverlayVis::CAM_CUTS ? ov.n_camcuts : t == OverlayVis::LIGHTS ? ov.n_lights :
                 t == OverlayVis::ENEMIES ? ov.n_items : t == OverlayVis::OBJECTS ? ov.n_enemies : ov.n_fog;
@@ -3453,12 +3474,20 @@ void ViewerPanel3D::fill_ov_tree() {
     SendMessageA(ov_tree, WM_SETREDRAW, FALSE, 0);
     TreeView_DeleteAllItems(ov_tree);
 
-    static const char* names[OverlayVis::N_TYPES] = {
+    static const char* names_dc1[OverlayVis::N_TYPES] = {
         "Cameras", "Script cameras (0x4C/0x2E)", "Camera cut zones", "Trigger zones (0x28)",
         "Floor zones", "Collision rects", "Enemy spawns (0x5B)", "Characters (0x20)",
         "Objects (0x42)", "Object spawns", "Lights (0x3A)", "Fog (0x3D)",
     };
+    /* A Dino Crisis 2 room fills the same lists from its own sections and
+       opcodes (dc2_room_overlay) */
+    static const char* names_dc2[OverlayVis::N_TYPES] = {
+        "Cameras", "Script cameras", "Camera cut zones", "Doors, triggers, items (0x30/0x31/0x35)",
+        "Zones (slot 7)", "Collision polygons (slot 2)", "Enemy spawns (0x1A)", "Characters",
+        "Markers (slot 1)", "Object spawns", "Lights", "Fog",
+    };
     const RdtSceneOverlay& ov = cached_overlay;
+    const char* const* names = ov.dc2 ? names_dc2 : names_dc1;
     char buf[128];
     for (int t = 0; t < OverlayVis::N_TYPES; t++) {
         HTREEITEM h = ov_tree_add(ov_tree, TVI_ROOT, names[t], t, -1, ov_vis.on[t]);
@@ -3507,7 +3536,19 @@ void ViewerPanel3D::fill_ov_tree() {
             for (int i = 0; i < ov.n_zones; i++) {
                 const RdtFloorZone& z = ov.zones[i];
                 if ((z.kind == RDT_ZONE_TRIGGER) != (t == OverlayVis::TRIGGERS)) continue;
-                if (t == OverlayVis::TRIGGERS)
+                if (ov.dc2 && t == OverlayVis::FLOOR_ZONES)
+                    _snprintf(buf, sizeof(buf) - 1, "#%d  (%d, %d)", n + 1, z.x[0], z.z[0]);
+                else if (ov.dc2 && z.arg < 0)
+                    _snprintf(buf, sizeof(buf) - 1, "#%d  %s, set by the script", n + 1,
+                              z.target_index == DC2_ZONE_DOOR ? "Door" :
+                              z.target_index == DC2_ZONE_ITEM ? "Item" : "Trigger");
+                else if (ov.dc2 && z.target_index == DC2_ZONE_DOOR)
+                    _snprintf(buf, sizeof(buf) - 1, "#%d  Door to ST%03X", n + 1, (unsigned)(u16)z.arg);
+                else if (ov.dc2 && z.target_index == DC2_ZONE_ITEM)
+                    _snprintf(buf, sizeof(buf) - 1, "#%d  Item 0x%02X", n + 1, (unsigned)(u16)z.arg);
+                else if (ov.dc2)
+                    _snprintf(buf, sizeof(buf) - 1, "#%d  Trigger, routine %d", n + 1, z.arg);
+                else if (t == OverlayVis::TRIGGERS)
                     _snprintf(buf, sizeof(buf) - 1, "#%d  type %d%s", n + 1, z.target_index,
                               z.target_index == 4 ? " (item)" : "");
                 else
@@ -3520,6 +3561,11 @@ void ViewerPanel3D::fill_ov_tree() {
                 const RdtCollisionRect& r = ov.collisions[i];
                 _snprintf(buf, sizeof(buf) - 1, "#%d  (%d, %d)  %d x %d", i + 1, r.x, r.z, r.w, r.h);
                 OV_ITEM(i);
+            }
+            for (int i = 0; i < ov.n_polys; i++) {
+                _snprintf(buf, sizeof(buf) - 1, "#%d  %d points  flags 0x%02X", ov.polys[i].index,
+                          ov.polys[i].count, ov.polys[i].flags);
+                OV_ITEM(ov.n_collisions + i);
             }
             break;
         case OverlayVis::ENEMIES:
@@ -4785,7 +4831,7 @@ void ViewerPanel3D::render() {
 
     /* Overlay legend — right side, only when overlay is visible: the types
        the room has and the overlay tree shows (zone rows: that zone type) */
-    if (show_overlay && gl_overlay_id && !is_emd) {
+    if (show_overlay && gl_overlay_id && !is_emd && !cached_overlay.dc2) {
         const RdtSceneOverlay& ov = cached_overlay;
         struct LegendRow { float r, g, b; int type, zone; const char* label; };
         static const LegendRow rows[] = {
@@ -7404,6 +7450,15 @@ bool ScdPanel::load(const u8* rdt_data, size_t rdt_size, u32 base_addr) {
     return true;
 }
 
+/* Dino Crisis 2 room: the slot-5 script.  Its text is not decoded. */
+bool ScdPanel::load_dc2(const u8* room, size_t room_size, u32 base_addr) {
+    sel_line = -1;
+    scroll_y = 0;
+    text_data.init();
+    loaded = dc2_scd_disassemble(room, room_size, base_addr, disasm);
+    return loaded;
+}
+
 void ScdPanel::paint(HDC hdc, RECT& rc) {
     extern AppTheme T;
     int w = rc.right, h = rc.bottom;
@@ -7512,7 +7567,9 @@ void ScdPanel::paint(HDC hdc, RECT& rc) {
 
         /* Disassembly column — color by category */
         COLORREF asm_color;
-        if (l.opcode < 0x70) {
+        if (disasm.dc2) {
+            asm_color = cat_colors[dc2_scd_op_category(l.opcode)];
+        } else if (l.opcode < 0x70) {
             int cat = g_scd_opcodes[l.opcode].category;
             asm_color = cat_colors[cat];
         } else if (l.opcode == 0xFF) {

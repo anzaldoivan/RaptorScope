@@ -191,6 +191,13 @@ enum { DC2_ZONE_TRIGGER = 1, DC2_ZONE_ITEM = 2, DC2_ZONE_DOOR = 4 };
    whose position is not a literal are left out. */
 bool dc2_room_overlay(const u8* dec, size_t dec_size, u32 base, RdtSceneOverlay& overlay);
 
+/* The room's draw mesh is not decoded, so there is nothing to show but
+   the overlay.  This gives the viewer the collision outline as a mesh to
+   frame: one zero-area triangle along each polygon edge, in viewer
+   coordinates on y = 0.  Filled it draws nothing; in wireframe (W) it is
+   the outline. */
+void dc2_room_outline_mesh(const RdtSceneOverlay& overlay, Mesh& mesh);
+
 /*═══════════════════════════════════════════════════════════════════
  *  DCM model (K127, DCM-DC2-TEXTURE-PLAN.md)
  *

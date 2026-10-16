@@ -6,6 +6,7 @@
 #include "ui/panels.h"
 #include "formats/dat.h"
 #include "formats/mesh.h"
+#include "formats/dc2.h"
 #include "formats/scd.h"
 #include "formats/texture.h"
 #include "formats/tim.h"
@@ -59,6 +60,10 @@ static HWND   g_panels[PANEL_COUNT];
 
 /* Persistent storage for EMD model (animation needs it to live across frames) */
 static EmdModel* g_emd_model = 0;
+
+/* Dino Crisis 2: the .TEX package beside the open one (E00.TEX for
+   E00.DAT), which holds an enemy model's texture.  Loaded on first use. */
+static DatArchive* g_dc2_skin = 0;
 
 /* EMD header offsets discovered during tree building (for multi-EMD entries) */
 #define MAX_EMDS_PER_ENTRY 16
@@ -917,6 +922,28 @@ bool App::open_archive(const char* path) {
                         }
                     }
 
+                    /* ── Raw 320x240 15-bit image: Dino Crisis 2 *.PXL
+                       (M_TITLE.PXL, CAPLOGO.PXL, WARNING*.PXL), the same
+                       pixels as a DC1 background entry (dinorand K109) ── */
+                    if (!handled && sz == 320 * 240 * 2) {
+                        u8* rgba = (u8*)calloc(320 * 240, 4);
+                        if (rgba) {
+                            render_16bpp(raw_hex_buf, 320, 240, rgba);
+                            g_image.set_bitmap(rgba, 320, 240);
+                            free(rgba);
+                            switch_panel(PANEL_IMAGE);
+                            InvalidateRect(g_image.hwnd, 0, FALSE);
+                            char node[256];
+                            _snprintf(node, 255, "%s  (Image 320x240 16bpp)", fname);
+                            tree_add(hTree, TVI_ROOT, node, -1);
+                            char buf2[512];
+                            _snprintf(buf2, 511, TITLE_PREFIX "%s (raw image 320x240 16bpp)", path);
+                            SetWindowTextA(hMain, buf2);
+                            set_status(buf2 + TITLE_PREFIX_LEN);
+                            handled = true;
+                        }
+                    }
+
                     /* ── Generic raw hex fallback ── */
                     if (!handled && hTree) {
                         char node[256];
@@ -942,7 +969,8 @@ bool App::open_archive(const char* path) {
         int num_items = archive->count;
         _snprintf(buf, 511, TITLE_PREFIX "%s - Item Sprite Bank (%d sprites)", path, num_items);
     } else {
-        _snprintf(buf, 511, TITLE_PREFIX "%s - %d entries", path, archive->count);
+        _snprintf(buf, 511, TITLE_PREFIX "%s - %d entries%s", path, archive->count,
+                  archive->is_dc2 ? " (Dino Crisis 2)" : "");
     }
     SetWindowTextA(hMain, buf);
     set_status(buf + TITLE_PREFIX_LEN);
@@ -955,6 +983,7 @@ void App::close_archive() {
     g_image.cur_pal = 0;
     g_image.clear_face_usage();
     delete archive; archive = 0;
+    delete g_dc2_skin; g_dc2_skin = 0;
     free(raw_hex_buf); raw_hex_buf = 0; raw_hex_size = 0;
     if (hTree) TreeView_DeleteAllItems(hTree);
     /* Destroy any text overlay controls */
@@ -1066,6 +1095,45 @@ static HTREEITEM tree_add(HWND hTree, HTREEITEM parent, const char* text, LPARAM
     return TreeView_InsertItem(hTree, &tvi);
 }
 
+/*─── Dino Crisis 2: tree node of an LZSS0 entry ─────────────────*/
+/* A room (the scene, then one child per section of its directory; the
+   child's sub-selector is slot + 1), a model, a 320x240 picture, or data
+   nobody has decoded. */
+static void dc2_tree_add(HWND hTree, HTREEITEM parent, int i, const DatEntry& e)
+{
+    char label[160];
+    Buffer dec;
+    if (!dat_entry_payload(e, dec) || dec.size == 0) {
+        _snprintf(label, 159, "#%d  Compressed Data  %u bytes", i, e.size);
+        tree_add(hTree, parent, label, i);
+        return;
+    }
+    Dc2RoomDir dir;
+    Dc2ModelInfo mi;
+    if (dc2_model_probe(dec.data, dec.size, e.load_base, mi)) {
+        _snprintf(label, 159, "#%d  Model  %d parts, %d verts, %d faces  %u bytes",
+                  i, mi.parts, mi.verts, mi.tris + mi.quads * 2, e.size);
+        tree_add(hTree, parent, label, i);
+    } else if (dc2_room_directory(dec.data, dec.size, e.load_base, dir)) {
+        _snprintf(label, 159, "#%d  Room  %u -> %u bytes", i, e.size, (unsigned)dec.size);
+        HTREEITEM hRoom = tree_add(hTree, parent, label, -1);
+        tree_add(hTree, hRoom, "Scene (collision, zones, doors, items, spawns)", i);
+        for (int k = 0; k < DC2_ROOM_SLOTS - 1; k++) {
+            if (!dir.present[k]) continue;
+            _snprintf(label, 159, "Slot %d  %s  %u bytes", k, dc2_room_slot_name(k), dir.size[k]);
+            tree_add(hTree, hRoom, label, (LPARAM)(((k + 1) << 16) | i));
+        }
+        TreeView_Expand(hTree, hRoom, TVE_EXPAND);
+    } else if (dec.size == 320u * 240u * 2u) {
+        _snprintf(label, 159, "#%d  Background 320x240 16bpp  %u bytes", i, e.size);
+        tree_add(hTree, parent, label, i);
+    } else {
+        _snprintf(label, 159, "#%d  Compressed Data  %u -> %u bytes  load@0x%08X",
+                  i, e.size, (unsigned)dec.size, (unsigned)e.load_base);
+        tree_add(hTree, parent, label, i);
+    }
+}
+
 void App::build_tree() {
     TreeView_DeleteAllItems(hTree);
     g_emd_info_count = 0;
@@ -1099,7 +1167,8 @@ void App::build_tree() {
     /* Helper: is this entry a real texture (vs EMD skeleton header in type 3+4 pair)?
        PS1 VRAM is 1024x512 halfwords; entries with x>1024 or 1x1 dims are metadata, not textures. */
     auto is_real_texture = [](const DatEntry& e) -> bool {
-        if (e.type != DAT_TEXTURE && e.type != DAT_LZSS1 && e.type != DAT_TEXTURE_LINEAR)
+        if (e.type != DAT_TEXTURE && e.type != DAT_LZSS1 && e.type != DAT_TEXTURE_LINEAR &&
+            e.type != DAT_DC2_LZSS2)
             return false;
         if (e.x > 1024 || (e.w < 2 && e.h < 2))
             return false;
@@ -1112,11 +1181,11 @@ void App::build_tree() {
         const DatEntry& e = archive->entries[i];
         if (is_real_texture(e)) { nTex++; continue; }
         switch (effective_entry_type(e)) {
-        case DAT_TEXTURE: case DAT_LZSS1: case DAT_TEXTURE_LINEAR: nData++; break; /* non-texture LZSS1 → data */
+        case DAT_TEXTURE: case DAT_LZSS1: case DAT_TEXTURE_LINEAR: case DAT_DC2_LZSS2: nData++; break; /* non-texture LZSS1 → data */
         case DAT_PALETTE: nPal++; break;
         case DAT_SNDH: nSndH++; break;
         case DAT_SNDB: nSndB++; break;
-        case DAT_SNDE: nSndE++; break;
+        case DAT_SNDE: case DAT_DC2_SOUND: case DAT_DC2_MP3: nSndE++; break;
         case DAT_LZSS0: nLzss0++; break;
         default: nData++; break;
         }
@@ -1160,7 +1229,7 @@ void App::build_tree() {
         const DatEntry& e = archive->entries[i];
 
         switch (effective_entry_type(e)) {
-        case DAT_TEXTURE: case DAT_LZSS1: case DAT_TEXTURE_LINEAR:
+        case DAT_TEXTURE: case DAT_LZSS1: case DAT_TEXTURE_LINEAR: case DAT_DC2_LZSS2:
             if (is_real_texture(e)) {
                 int tx = e.x / 64;
                 int ty = e.y / 256;
@@ -1239,7 +1308,18 @@ void App::build_tree() {
             tree_add(hTree, hSounds, label, i);
         } break;
 
+        case DAT_DC2_SOUND:
+            _snprintf(label, 127, "#%d  Sound bank (not decoded)  %u bytes", i, e.size);
+            tree_add(hTree, hSounds, label, i);
+            break;
+        case DAT_DC2_MP3:
+            /* The word after the size is the track number (dinorand K96) */
+            _snprintf(label, 127, "#%d  MP3 track %u  %u bytes", i, (unsigned)e.load_base, e.size);
+            tree_add(hTree, hSounds, label, i);
+            break;
+
         case DAT_LZSS0: {
+            if (archive->is_dc2) { dc2_tree_add(hTree, hModels, i, e); break; }
             /* Use RDT layout for structured info + classification */
             RdtLayout layout;
             bool has_layout = false;
@@ -1543,10 +1623,13 @@ static void layout_main(HWND hwnd)
  *       U = (TX*64 - tex_vram_x) * ppw / tex_w, so it all works when
  *       tex_vram_x = min VRAM X and tex_w = total pixel width
  *═══════════════════════════════════════════════════════════════════*/
-static void upload_archive_texture()
+/* src: the archive to take textures and palettes from, when it is not
+   the open one (a Dino Crisis 2 enemy's .TEX) */
+static void upload_archive_texture(DatArchive* src = 0)
 {
-    if (!g_app.archive) return;
-    DatArchive& ar = *g_app.archive;
+    if (!src) src = g_app.archive;
+    if (!src) return;
+    DatArchive& ar = *src;
 
     /* ── Atlas cache: skip full rebuild if archive+sub-pal config unchanged ── */
     static DatArchive* s_cached_archive = 0;
@@ -2002,6 +2085,33 @@ static void export_selected_mesh(HWND hwnd, bool smd)
     int sub = (sel >> 16) & 0xFF;
     Buffer dec;
     bool usable = sel >= 0 && g_app.archive && eidx < g_app.archive->count;
+    if (usable && g_app.archive->is_dc2) {
+        /* Dino Crisis 2: a model in its bind pose.  Rooms have no mesh. */
+        const DatEntry& e = g_app.archive->entries[eidx];
+        EmdModel m;
+        if (e.type != DAT_LZSS0 || !dat_entry_payload(e, dec) ||
+            !dc2_parse_model(dec.data, dec.size, e.load_base, m)) {
+            MessageBoxA(hwnd, "Select a model entry first. A Dino Crisis 2 room has no mesh to export: its geometry is not decoded.",
+                        title, MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        char path[MAX_PATH];
+        if (!ui_save_file(hwnd, path, MAX_PATH,
+                          smd ? "SMD Files (*.smd)\0*.smd\0" : "OBJ Files (*.obj)\0*.obj\0",
+                          title, smd ? "smd" : "obj"))
+            return;
+        bool ok = smd ? export_emd_smd(path, m) : export_mesh_obj(path, m.mesh);
+        if (!ok) {
+            MessageBoxA(hwnd, "Export failed: the file could not be written.", title, MB_OK | MB_ICONERROR);
+            return;
+        }
+        char msg[MAX_PATH + 96];
+        _snprintf(msg, sizeof(msg) - 1, "Exported model: %d verts, %d faces to %s",
+                  m.mesh.vert_count, m.mesh.tri_count, path);
+        msg[sizeof(msg) - 1] = 0;
+        g_app.set_status(msg);
+        return;
+    }
     if (usable) {
         const DatEntry& e = g_app.archive->entries[eidx];
         usable = effective_entry_type(e) == DAT_LZSS0 && (e.y & 0x8000) &&
@@ -2069,6 +2179,177 @@ static void export_selected_mesh(HWND hwnd, bool smd)
 }
 
 /*═══════════════════════════════════════════════════════════════════
+ *  Dino Crisis 2 entry selection
+ *═══════════════════════════════════════════════════════════════════*/
+
+/* Show bytes that live only in a local buffer: keep a copy for the hex view */
+static void dc2_show_hex(const u8* data, size_t size)
+{
+    free(g_app.raw_hex_buf);
+    g_app.raw_hex_buf = (u8*)malloc(size ? size : 1);
+    g_app.raw_hex_size = g_app.raw_hex_buf ? size : 0;
+    if (g_app.raw_hex_buf) memcpy(g_app.raw_hex_buf, data, size);
+    g_hex.set_data(g_app.raw_hex_buf, g_app.raw_hex_size);
+    InvalidateRect(g_hex.hwnd, 0, TRUE);
+}
+
+/* The archive holding the texture a model's header names: the open
+   package, or else the .TEX of the same name next to it. */
+static DatArchive* dc2_texture_source(u16 tpage, u16 clut)
+{
+    int tex, pal;
+    if (dc2_model_texture(*g_app.archive, tpage, clut, tex, pal)) return g_app.archive;
+    if (!g_dc2_skin) {
+        char path[MAX_PATH];
+        _snprintf(path, MAX_PATH - 1, "%s", g_app.archive->filename.c_str());
+        path[MAX_PATH - 1] = 0;
+        char* dot = strrchr(path, '.');
+        if (dot && strlen(dot) == 4) {
+            memcpy(dot, ".TEX", 4);
+            g_dc2_skin = new DatArchive();
+            if (!dat_parse_file(path, *g_dc2_skin)) { delete g_dc2_skin; g_dc2_skin = 0; }
+        }
+    }
+    if (g_dc2_skin && dc2_model_texture(*g_dc2_skin, tpage, clut, tex, pal)) return g_dc2_skin;
+    return g_app.archive;
+}
+
+/* A DCM model, in its bind pose.  Every face has the header's tpage and
+   clut, so the atlas needs one CLUT and the UV editor one page. */
+static bool dc2_show_model(int idx, const DatEntry& e, const u8* dd, size_t ds)
+{
+    if (g_emd_model) { delete g_emd_model; g_emd_model = 0; }
+    g_emd_model = new EmdModel();
+    if (!dc2_parse_model(dd, ds, e.load_base, *g_emd_model)) {
+        delete g_emd_model; g_emd_model = 0;
+        return false;
+    }
+    const Mesh& em = g_emd_model->mesh;
+    u16 tpage = em.tri_count > 0 ? em.tris[0].tpage : 0;
+    u16 clut  = em.tri_count > 0 ? em.tris[0].clut : 0;
+    int depth = (tpage >> 7) & 3;      /* 0 = 4bpp, 1 = 8bpp, 2 = 16bpp */
+
+    g_viewer3d.max_sub_pal = 0;
+    g_viewer3d.n_used_cluts = 0;
+    memset(g_viewer3d.slice_map, -1, sizeof(g_viewer3d.slice_map));
+    memset(g_viewer3d.used_clut_is4bpp, 0, sizeof(g_viewer3d.used_clut_is4bpp));
+    g_viewer3d.desired_bpp = (depth == 0) ? 4 : (depth == 2) ? 16 : 8;
+    if (em.tri_count > 0) {
+        g_viewer3d.used_cluts[0] = clut;
+        g_viewer3d.used_clut_is4bpp[0] = (depth == 0);
+        g_viewer3d.n_used_cluts = 1;
+        if (depth == 0) g_viewer3d.max_sub_pal = clut & 0x3F;
+    }
+    DatArchive* src = dc2_texture_source(tpage, clut);
+    upload_archive_texture(src);
+
+    /* UV editor crop: the one texture page the model samples */
+    {
+        int tex_ppw = (g_viewer3d.tex_bpp == 4) ? 4 : (g_viewer3d.tex_bpp == 16) ? 1 : 2;
+        int face_ppw = (depth == 0) ? 4 : (depth == 2) ? 1 : 2;
+        int min_px = ((tpage & 0xF) * 64 - (int)g_viewer3d.tex_vram_x) * tex_ppw;
+        int max_px = min_px + 256 * tex_ppw / face_ppw;
+        if (min_px < 0) min_px = 0;
+        if (max_px > g_viewer3d.tex_w) max_px = g_viewer3d.tex_w;
+        g_viewer3d.uv_crop_px_x = min_px;
+        g_viewer3d.uv_crop_px_w = max_px > min_px ? max_px - min_px : 0;
+        g_viewer3d.uv_crop_py_y = ((tpage >> 4) & 1) * 256;
+        g_viewer3d.uv_crop_py_h = 256;
+        g_viewer3d.uv_tex_vram_x = (u16)((int)g_viewer3d.tex_vram_x + min_px / tex_ppw);
+        g_viewer3d.uv_tex_vram_y = 0;
+        int row = ((clut >> 6) & 0x1FF) - g_viewer3d.clut_base_y;
+        if (row >= g_viewer3d.num_pal_rows) row = g_viewer3d.num_pal_rows - 1;
+        if (row < 0) row = 0;
+        g_viewer3d.uv_cache_clut_row = row;
+    }
+    g_viewer3d.set_emd(*g_emd_model);
+    g_viewer3d.set_emd_anim(g_emd_model);
+
+    char buf[256];
+    _snprintf(buf, 255, "Entry %d: DC2 Model  -  %d verts, %d faces, %d bones  |  texture: %s  (bind pose; DC2 animation is not decoded)",
+              idx, em.vert_count, em.tri_count, g_emd_model->skeleton.bone_count,
+              src == g_dc2_skin ? "from the .TEX file" :
+              g_viewer3d.has_texture ? "this package" : "not found");
+    g_app.set_status(buf);
+    g_app.switch_panel(PANEL_3D);
+    return true;
+}
+
+/* An LZSS0 entry of a DC2 package.  sub = 0: the entry itself; sub = slot
+   + 1: one section of a room, as hex.  Returns false to leave the entry
+   to the hex view. */
+static bool dc2_entry_select(int idx, int sub, const DatEntry& e)
+{
+    Buffer dec;
+    if (!dat_entry_payload(e, dec) || dec.size == 0) return false;
+    const u8* dd = dec.data;
+    size_t    ds = dec.size;
+    char buf[256];
+
+    Dc2ModelInfo mi;
+    if (dc2_model_probe(dd, ds, e.load_base, mi))
+        return dc2_show_model(idx, e, dd, ds);
+
+    Dc2RoomDir dir;
+    if (dc2_room_directory(dd, ds, e.load_base, dir)) {
+        int slot = sub - 1;
+        if (slot >= 0 && slot < DC2_ROOM_SLOTS && dir.present[slot]) {
+            dc2_show_hex(dd + dir.off[slot], dir.size[slot]);
+            _snprintf(buf, 255, "Entry %d: Room slot %d  -  %s, %u bytes at 0x%X",
+                      idx, slot, dc2_room_slot_name(slot), dir.size[slot], dir.off[slot]);
+            g_app.set_status(buf);
+            g_app.switch_panel(PANEL_HEX);
+            return true;
+        }
+
+        /* The draw mesh is not decoded: the scene is the overlay, framed
+           by the collision outline. */
+        RdtSceneOverlay overlay;
+        dc2_room_overlay(dd, ds, e.load_base, overlay);
+        Mesh mesh;
+        dc2_room_outline_mesh(overlay, mesh);
+        g_viewer3d.clear_texture();
+        g_viewer3d.uv_crop_px_x = g_viewer3d.uv_crop_px_w = 0;
+        g_viewer3d.uv_crop_py_y = g_viewer3d.uv_crop_py_h = 0;
+        g_viewer3d.set_mesh(mesh);
+        overlay_floor_heights(mesh, overlay);
+        g_viewer3d.show_overlay = true;
+        g_viewer3d.set_overlay(overlay);
+        g_scd.load_dc2(dd, ds, e.load_base);
+
+        _snprintf(buf, 255, "Entry %d: DC2 Room  -  %d collision polygons, %d zones/doors/triggers/items, %d spawns, %d markers  (room mesh and cameras are not decoded)  [O=overlay, F4=SCD]",
+                  idx, overlay.n_polys, overlay.n_zones, overlay.n_items, overlay.n_enemies);
+        g_app.set_status(buf);
+        g_app.switch_panel(PANEL_3D);
+        return true;
+    }
+
+    /* TITLE.DAT's picture: 320x240, 15-bit, like a DC1 background */
+    if (ds == 320u * 240u * 2u) {
+        u8* rgba = (u8*)calloc(320 * 240, 4);
+        if (rgba) {
+            render_16bpp(dd, 320, 240, rgba);
+            g_image.set_bitmap(rgba, 320, 240);
+            free(rgba);
+            _snprintf(buf, 255, "Entry %d: Background 320x240 16bpp (LZSS0), %u -> %u bytes",
+                      idx, e.size, (unsigned)ds);
+            g_app.set_status(buf);
+            g_app.switch_panel(PANEL_IMAGE);
+            InvalidateRect(g_image.hwnd, 0, FALSE);
+            return true;
+        }
+    }
+
+    /* Anything else: the decompressed bytes */
+    dc2_show_hex(dd, ds);
+    _snprintf(buf, 255, "Entry %d: Compressed Data (LZSS0), %u -> %u bytes, load@0x%08X  (decompressed bytes shown)",
+              idx, e.size, (unsigned)ds, (unsigned)e.load_base);
+    g_app.set_status(buf);
+    g_app.switch_panel(PANEL_HEX);
+    return true;
+}
+
+/*═══════════════════════════════════════════════════════════════════
  *  Entry selection  -  auto-switch panel based on type
  *═══════════════════════════════════════════════════════════════════*/
 static void on_entry_select(int sel_param)
@@ -2112,7 +2393,7 @@ static void on_entry_select(int sel_param)
         g_image.render_linear(e, pal);
         InvalidateRect(g_image.hwnd, 0, FALSE);
     } break;
-    case DAT_TEXTURE: case DAT_LZSS1: {
+    case DAT_TEXTURE: case DAT_LZSS1: case DAT_DC2_LZSS2: {
         panel = PANEL_IMAGE;
         /* Find best palette: nearest FOLLOWING DAT_PALETTE entry
            with no intervening texture entry (tex→pal adjacency).
@@ -2121,7 +2402,8 @@ static void on_entry_select(int sel_param)
         for (int j = idx + 1; j < g_app.archive->count; j++) {
             u32 jt = g_app.archive->entries[j].type;
             if (jt == DAT_PALETTE) { pal = &g_app.archive->entries[j]; break; }
-            if (jt == DAT_TEXTURE || jt == DAT_LZSS1 || jt == DAT_TEXTURE_LINEAR) break;
+            if (jt == DAT_TEXTURE || jt == DAT_LZSS1 || jt == DAT_TEXTURE_LINEAR ||
+                jt == DAT_DC2_LZSS2) break;
         }
         if (!pal) {
             for (int j = idx - 1; j >= 0; j--) {
@@ -2186,6 +2468,10 @@ static void on_entry_select(int sel_param)
         }
         break;
     case DAT_LZSS0:
+        if (g_app.archive->is_dc2) {
+            if (dc2_entry_select(idx, sub, e)) return;
+            break;
+        }
         if (e.y & 0x8000) {
             u32 base = ((u32)(e.y & 0x7FFF) << 16) | (u32)e.x | 0x80000000u;
 
@@ -2790,8 +3076,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_FILE_OPEN: {
             char path[MAX_PATH];
             if (ui_open_file(hwnd, path, MAX_PATH,
-                "All Supported Files\0*.dat;*.bin;*.imd;*.tim;*.dns;*.dno;*.str;*.avi;*.mpg;*.emd;*.wav\0"
+                "All Supported Files\0*.dat;*.bin;*.imd;*.tim;*.dns;*.dno;*.str;*.avi;*.mpg;*.emd;*.wav;*.dbs;*.tex;*.pxl\0"
                 "DAT Archives (*.dat)\0*.dat\0"
+                "Dino Crisis 2 (*.dat;*.dbs;*.tex;*.pxl)\0*.dat;*.dbs;*.tex;*.pxl\0"
                 "WAV Audio (*.wav)\0*.wav\0"
                 "BIN Files (*.bin)\0*.bin\0"
                 "IMD Images (*.imd)\0*.imd\0"
@@ -3028,6 +3315,14 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             fwrite(g_app.archive->raw, 1, g_app.archive->raw_size, f);
                             fclose(f);
                         }
+                    } else if (g_app.archive->is_dc2) {
+                        /* 32-byte entries, and whatever follows the last
+                           entry (ST*.DBS: the background images) */
+                        const DatArchive& ar = *g_app.archive;
+                        if (!dat_write_file(path, ar.entries, ar.count, true,
+                                            ar.raw + ar.tail_off, ar.raw_size - ar.tail_off))
+                            MessageBoxA(hwnd, "The package could not be written.", "Save DAT Archive",
+                                        MB_OK | MB_ICONERROR);
                     } else {
                         dat_write_file(path, g_app.archive->entries, g_app.archive->count);
                     }
@@ -3040,8 +3335,11 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int eidx = sel & 0xFFFF;
             if (eidx >= 0 && g_app.archive && eidx < g_app.archive->count) {
                 char path[MAX_PATH];
+                /* A DC2 music entry is a complete MP3 stream */
+                bool mp3 = g_app.archive->entries[eidx].type == DAT_DC2_MP3;
                 if (ui_save_file(hwnd, path, MAX_PATH,
-                    "All Files (*.*)\0*.*\0", "Export Entry", "bin")) {
+                    mp3 ? "MP3 Audio (*.mp3)\0*.mp3\0All Files (*.*)\0*.*\0" : "All Files (*.*)\0*.*\0",
+                    "Export Entry", mp3 ? "mp3" : "bin")) {
                     FILE* f = fopen(path, "wb");
                     if (f) {
                         fwrite(g_app.archive->entries[eidx].data, 1,
@@ -3066,7 +3364,8 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                         u8* fbuf = (u8*)malloc(fsz);
                         if (fbuf && fread(fbuf, 1, fsz, f) == fsz) {
                             DatEntry& e = g_app.archive->entries[eidx];
-                            bool is_lzss = (e.type == DAT_LZSS0 || e.type == DAT_LZSS1);
+                            bool is_lzss = (e.type == DAT_LZSS0 || e.type == DAT_LZSS1 ||
+                                            e.type == DAT_DC2_LZSS2);
 
                             /* For LZSS entries: ask if data is raw (needs compression) */
                             bool compress = false;
@@ -3243,7 +3542,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             int eidx = sel & 0xFFFF;
             if (eidx >= 0 && g_app.archive && eidx < g_app.archive->count) {
                 const DatEntry& e = g_app.archive->entries[eidx];
-                if (e.type == DAT_LZSS0 || e.type == DAT_LZSS1) {
+                if (e.type == DAT_LZSS0 || e.type == DAT_LZSS1 || e.type == DAT_DC2_LZSS2) {
                     Buffer dec;
                     if (lzss_decompress(e.data, e.size, dec) && dec.size > 0) {
                         char path[MAX_PATH];
@@ -3255,6 +3554,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                                 fwrite(dec.data, 1, dec.size, f);
                                 fclose(f);
                                 u32 ba = ((u32)(e.y & 0x7FFF) << 16) | (u32)e.x | 0x80000000u;
+                                if (g_app.archive->is_dc2) ba = e.load_base;
                                 char msg[256];
                                 _snprintf(msg, 255, "Exported %u bytes (from %u compressed)  base=0x%08X",
                                     (unsigned)dec.size, e.size, ba);
