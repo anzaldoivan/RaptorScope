@@ -150,16 +150,15 @@ static void package(const char* dirpath, const char* name)
         return;
     }
     size_t built_size = 0;
-    u8* built = dat_build(a.entries, a.count, built_size, a.is_dc2,
-                          raw + a.tail_off, (size_t)sz - a.tail_off);
+    u8* built = dat_build(a.entries, a.count, built_size, a.is_dc2);
     bool same = built && built_size == (size_t)sz && memcmp(built, raw, sz) == 0;
     size_t first_diff = 0;
     if (built && !same)
         while (first_diff < built_size && first_diff < (size_t)sz && built[first_diff] == raw[first_diff])
             first_diff++;
-    printf("PKG\t%s\t%ld\t%d\t%s\t%s\t%lu\t%lu\t%lu\n", name, sz, a.count, a.is_dc2 ? "dc2" : "dc1",
+    printf("PKG\t%s\t%ld\t%d\t%s\t%s\t%lu\t%lu\t%d\n", name, sz, a.count, a.is_dc2 ? "dc2" : "dc1",
            same ? "rebuild-same" : "rebuild-differs", (unsigned long)built_size, (unsigned long)first_diff,
-           (unsigned long)((size_t)sz - a.tail_off));
+           a.n_packages);
     free(built);
 
     for (int i = 0; i < a.count; i++) {

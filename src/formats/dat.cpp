@@ -109,10 +109,25 @@ static const u32 s_dc2_types[9] = {
 };
 
 /*─── Parse .dat from memory ─────────────────────────────────────*/
-bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive)
+
+/* Entries in the header sector at h.  A DC2 header also ends at a
+   zero-size entry: ITEM.DAT's first sector is all zeros and is not a
+   package. */
+static int header_count(const u8* h, bool dc2)
 {
     static const u8 dummy_sig[] = "dummy header";
+    size_t stride = dc2 ? DAT_ENTRY_DC2 : DAT_ENTRY_DC1;
+    int count = 0;
+    for (size_t off = 0; off + stride <= DAT_SECTOR; off += stride, count++) {
+        if (memcmp(h + off, dummy_sig, 12) == 0) break;
+        if (rd_u32(h + off) > 8) break;
+        if (dc2 && rd_u32(h + off + 4) == 0) break;
+    }
+    return count;
+}
 
+bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive)
+{
     if (raw_size < DAT_SECTOR) return false;
 
     /* Check for item sprite bank format (item.dat / item2.dat) */
@@ -124,17 +139,22 @@ bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive)
     bool dc2 = dat_is_dc2(raw, raw_size);
     size_t stride = dc2 ? DAT_ENTRY_DC2 : DAT_ENTRY_DC1;
 
-    /* Count entries in header.  A DC2 header also ends at a zero-size
-       entry: ITEM.DAT's first sector is all zeros and is not a package. */
-    int count = 0;
-    size_t off = 0;
-    while (off + stride <= DAT_SECTOR) {
-        if (memcmp(raw + off, dummy_sig, 12) == 0) break;
-        u32 t = rd_u32(raw + off);
-        if (t > 8) break;
-        if (dc2 && rd_u32(raw + off + 4) == 0) break;
-        count++;
-        off += stride;
+    /* Count the entries.  A DC2 file can be several packages end to end,
+       each with its own header sector: ST*.DBS has one per camera of its
+       room, and they tile all 89 files exactly (dinorand K142).  No other
+       file of the game has anything after its first package. */
+    int count = 0, packages = 0;
+    for (size_t pos = 0; pos + DAT_SECTOR <= raw_size; ) {
+        int n = header_count(raw + pos, dc2);
+        if (n == 0) break;
+        count += n;
+        packages++;
+        if (!dc2) break;
+        size_t len = DAT_SECTOR;
+        for (int i = 0; i < n; i++)
+            len += dc_align_sector(rd_u32(raw + pos + i * stride + 4));
+        if (len > raw_size - pos) break;
+        pos += len;
     }
 
     if (count == 0) {
@@ -146,38 +166,40 @@ bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive)
     archive.entries = new DatEntry[count];
     archive.count = count;
     archive.is_dc2 = dc2;
+    archive.n_packages = packages;
 
-    /* Parse header entries */
-    off = 0;
-    for (int i = 0; i < count; i++) {
-        DatEntry& e = archive.entries[i];
-        e.raw_type = rd_u32(raw + off);
-        e.type = dc2 ? s_dc2_types[e.raw_type] : e.raw_type;
-        e.size = rd_u32(raw + off + 4);
-        e.x    = rd_u16(raw + off + 8);
-        e.y    = rd_u16(raw + off + 10);
-        e.w    = rd_u16(raw + off + 12);
-        e.h    = rd_u16(raw + off + 14);
-        if (dc2) e.load_base = rd_u32(raw + off + 8);
-        off += stride;
-    }
-
-    /* Assign data pointers.  An entry that runs past the end of the file
-       gets no data, and the entries after it keep their places. */
-    size_t data_off = DAT_SECTOR;
-    for (int i = 0; i < count; i++) {
-        DatEntry& e = archive.entries[i];
-        u32 stored = e.size;
-        e.offset = (u32)data_off;
-        if (data_off + e.size <= raw_size) {
-            e.data = raw + data_off;
-        } else {
-            e.data = 0;
-            e.size = 0;
+    /* Parse each package's header entries and assign data pointers.  An
+       entry that runs past the end of the file gets no data, and the
+       entries after it keep their places. */
+    size_t pos = 0;
+    int i = 0;
+    for (int p = 0; p < packages; p++) {
+        int n = header_count(raw + pos, dc2);
+        size_t data_off = pos + DAT_SECTOR;
+        for (int k = 0; k < n; k++, i++) {
+            const u8* h = raw + pos + k * stride;
+            DatEntry& e = archive.entries[i];
+            e.raw_type = rd_u32(h);
+            e.type = dc2 ? s_dc2_types[e.raw_type] : e.raw_type;
+            e.size = rd_u32(h + 4);
+            e.x    = rd_u16(h + 8);
+            e.y    = rd_u16(h + 10);
+            e.w    = rd_u16(h + 12);
+            e.h    = rd_u16(h + 14);
+            if (dc2) e.load_base = rd_u32(h + 8);
+            e.package = (u16)p;
+            u32 stored = e.size;
+            e.offset = (u32)data_off;
+            if (data_off + e.size <= raw_size) {
+                e.data = raw + data_off;
+            } else {
+                e.data = 0;
+                e.size = 0;
+            }
+            data_off += dc_align_sector(stored);
         }
-        data_off += dc_align_sector(stored);
+        pos = data_off;
     }
-    archive.tail_off = data_off < raw_size ? data_off : raw_size;
 
     return true;
 }
@@ -194,71 +216,82 @@ bool dat_entry_payload(const DatEntry& entry, Buffer& out)
 }
 
 /*─── Build .dat file bytes ──────────────────────────────────────*/
-u8* dat_build(const DatEntry* entries, int count, size_t& out_size, bool dc2,
-              const u8* tail, size_t tail_size)
+u8* dat_build(const DatEntry* entries, int count, size_t& out_size, bool dc2)
 {
-    /* The header is one sector: 128 DC1 entries or 64 DC2 entries */
+    /* A header is one sector: 128 DC1 entries or 64 DC2 entries.  A new
+       package starts where DatEntry::package changes (DC2 ST*.DBS). */
     size_t stride = dc2 ? DAT_ENTRY_DC2 : DAT_ENTRY_DC1;
     out_size = 0;
-    if (count < 0 || (size_t)count * stride > DAT_SECTOR) return 0;
+    if (count < 0) return 0;
 
     /* Calculate total size */
-    size_t total = DAT_SECTOR;
-    for (int i = 0; i < count; i++)
+    size_t total = 0;
+    for (int i = 0, run = 0; i < count; i++) {
+        bool first = i == 0 || entries[i].package != entries[i - 1].package;
+        run = first ? 1 : run + 1;
+        if (run * stride > DAT_SECTOR) return 0;
+        if (first) total += DAT_SECTOR;
         total += dc_align_sector(entries[i].size);
-    if (!tail) tail_size = 0;
-    total += tail_size;
+    }
+    if (count == 0) total = DAT_SECTOR;
 
     u8* buf = (u8*)calloc(total, 1);
     if (!buf) return 0;
 
-    /* Write header.  A DC2 entry is the same 16 bytes followed by 16
-       zero bytes; the game reads the table at that stride, so a 16-byte
-       table crashes it (dinorand DC2-ROOM-CONTAINER-STRIDE-CRASH-RCA.md). */
     static const u8 dummy[] = "dummy header    ";
-    size_t hoff = 0;
-    for (int i = 0; i < count; i++) {
-        const DatEntry& e = entries[i];
-        wr_u32(buf + hoff,      dc2 ? e.raw_type : e.type);
-        wr_u32(buf + hoff + 4,  e.size);
-        wr_u16(buf + hoff + 8,  e.x);
-        wr_u16(buf + hoff + 10, e.y);
-        wr_u16(buf + hoff + 12, e.w);
-        wr_u16(buf + hoff + 14, e.h);
-        hoff += stride;
-    }
-    /* Fill rest of header with dummy markers */
-    while (hoff + stride <= DAT_SECTOR) {
-        memcpy(buf + hoff, dummy, 16);
-        hoff += stride;
-    }
+    size_t pos = 0;
+    for (int first = 0; first < count || first == 0; ) {
+        int end = first;
+        while (end < count && entries[end].package == entries[first].package) end++;
 
-    /* Write data */
-    size_t doff = DAT_SECTOR;
-    for (int i = 0; i < count; i++) {
-        const DatEntry& e = entries[i];
-        if (e.data && e.size > 0)
-            memcpy(buf + doff, e.data, e.size);
-        /* Pad to sector boundary: DC1 with the dummy pattern, DC2 with zeros */
-        size_t aligned = dc_align_sector(e.size);
-        size_t pad_start = doff + e.size;
-        size_t pad_end   = doff + aligned;
-        for (size_t p = pad_start; !dc2 && p + 16 <= pad_end; p += 16)
-            memcpy(buf + p, dummy, 16);
-        doff += aligned;
+        /* Write header.  A DC2 entry is the same 16 bytes followed by 16
+           zero bytes; the game reads the table at that stride, so a 16-byte
+           table crashes it (dinorand DC2-ROOM-CONTAINER-STRIDE-CRASH-RCA.md). */
+        size_t hoff = pos;
+        for (int i = first; i < end; i++) {
+            const DatEntry& e = entries[i];
+            wr_u32(buf + hoff,      dc2 ? e.raw_type : e.type);
+            wr_u32(buf + hoff + 4,  e.size);
+            wr_u16(buf + hoff + 8,  e.x);
+            wr_u16(buf + hoff + 10, e.y);
+            wr_u16(buf + hoff + 12, e.w);
+            wr_u16(buf + hoff + 14, e.h);
+            hoff += stride;
+        }
+        /* Fill rest of header with dummy markers */
+        while (hoff + stride <= pos + DAT_SECTOR) {
+            memcpy(buf + hoff, dummy, 16);
+            hoff += stride;
+        }
+
+        /* Write data */
+        size_t doff = pos + DAT_SECTOR;
+        for (int i = first; i < end; i++) {
+            const DatEntry& e = entries[i];
+            if (e.data && e.size > 0)
+                memcpy(buf + doff, e.data, e.size);
+            /* Pad to sector boundary: DC1 with the dummy pattern, DC2 with zeros */
+            size_t aligned = dc_align_sector(e.size);
+            size_t pad_start = doff + e.size;
+            size_t pad_end   = doff + aligned;
+            for (size_t p = pad_start; !dc2 && p + 16 <= pad_end; p += 16)
+                memcpy(buf + p, dummy, 16);
+            doff += aligned;
+        }
+        pos = doff;
+        if (end == first) break;    /* count == 0: one empty header */
+        first = end;
     }
-    if (tail_size) memcpy(buf + doff, tail, tail_size);
 
     out_size = total;
     return buf;
 }
 
 /*─── Write .dat to file ─────────────────────────────────────────*/
-bool dat_write_file(const char* path, const DatEntry* entries, int count, bool dc2,
-                    const u8* tail, size_t tail_size)
+bool dat_write_file(const char* path, const DatEntry* entries, int count, bool dc2)
 {
     size_t size = 0;
-    u8* buf = dat_build(entries, count, size, dc2, tail, tail_size);
+    u8* buf = dat_build(entries, count, size, dc2);
     if (!buf) return false;
 
     FILE* f = fopen(path, "wb");

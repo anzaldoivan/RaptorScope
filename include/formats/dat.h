@@ -51,11 +51,13 @@ struct DatEntry {
     u32  raw_type;    /* type number as stored in the file (differs from type in DC2) */
     u32  load_base;   /* DC2: first reserve word, the address the entry loads at
                          (same bytes as x, y); 0 in DC1 */
+    u16  package;     /* which package of the file the entry is in: 0, except
+                         in a DC2 ST*.DBS, which is a run of packages */
 
     DatEntry()
         : type(0), size(0), x(0), y(0), w(0), h(0)
         , offset(0), data(0), flags(0), owned(false)
-        , raw_type(0), load_base(0) {}
+        , raw_type(0), load_base(0), package(0) {}
 };
 
 #define DAT_FLAG_RAW_LINEAR  0x01  /* render as raw linear, no deswizzle */
@@ -70,13 +72,14 @@ struct DatArchive {
     bool      is_item_bank;  /* true if parsed as item sprite bank */
     bool      modified;       /* true if any entry was replaced */
     bool      is_dc2;         /* Dino Crisis 2 package: 32-byte header entries */
-    size_t    tail_off;       /* offset in raw of the bytes after the last entry;
-                                 raw_size when there are none (DC2 ST*.DBS
-                                 keeps its background images there) */
+    int       n_packages;     /* packages in the file: 1, except a DC2 ST*.DBS,
+                                 which holds one per camera of its room, laid
+                                 end to end (dinorand K142).  entries lists
+                                 them all; DatEntry::package tells them apart */
 
     DatArchive() : entries(0), count(0), raw(0), raw_size(0),
                    is_item_bank(false), modified(false),
-                   is_dc2(false), tail_off(0) {}
+                   is_dc2(false), n_packages(0) {}
     ~DatArchive() { free_data(); }
 
     void free_data() {
@@ -91,7 +94,7 @@ struct DatArchive {
         is_item_bank = false;
         modified = false;
         is_dc2 = false;
-        tail_off = 0;
+        n_packages = 0;
     }
 
 private:
@@ -125,14 +128,14 @@ bool dat_is_item_bank(const u8* raw, size_t raw_size);
 /* Build .dat file bytes from entries.
    Returns allocated buffer and sets out_size.  Caller owns result.
    dc2 writes a Dino Crisis 2 package: 32-byte header entries holding each
-   entry's raw_type, and zero padding.  tail is copied after the last
-   entry (DatArchive::tail_off). */
+   entry's raw_type, and zero padding; a new package (header sector) starts
+   wherever DatEntry::package changes. */
 u8* dat_build(const DatEntry* entries, int count, size_t& out_size,
-              bool dc2 = false, const u8* tail = 0, size_t tail_size = 0);
+              bool dc2 = false);
 
 /* Write rebuilt .dat to file. */
 bool dat_write_file(const char* path, const DatEntry* entries, int count,
-                    bool dc2 = false, const u8* tail = 0, size_t tail_size = 0);
+                    bool dc2 = false);
 
 /* Replace an entry's data.  If the entry type is LZSS (7, 8 or DC2's 8),
    the caller provides DECOMPRESSED data and this function compresses it.

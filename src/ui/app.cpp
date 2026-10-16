@@ -2931,11 +2931,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                             fclose(f);
                         }
                     } else if (g_app.archive->is_dc2) {
-                        /* 32-byte entries, and whatever follows the last
-                           entry (ST*.DBS: the background images) */
+                        /* 32-byte entries; a .DBS is written package by package */
                         const DatArchive& ar = *g_app.archive;
-                        if (!dat_write_file(path, ar.entries, ar.count, true,
-                                            ar.raw + ar.tail_off, ar.raw_size - ar.tail_off))
+                        if (!dat_write_file(path, ar.entries, ar.count, true))
                             MessageBoxA(hwnd, "The package could not be written.", "Save DAT Archive",
                                         MB_OK | MB_ICONERROR);
                     } else {

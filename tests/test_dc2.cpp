@@ -194,7 +194,7 @@ static void test_types_and_offsets()
         expect_off += dc_align_sector(e[i].size);
     }
     CHECK(ar.entries[5].offset - ar.entries[4].offset == 2 * DAT_SECTOR);
-    CHECK(ar.tail_off == pkg.size);
+    CHECK(ar.n_packages == 1);
 
     /* The rect of a texture (1), palette (2) or compressed texture (6) and
        the load address of anything else are the same eight bytes */
@@ -243,14 +243,29 @@ static void test_round_trip()
     CHECK(dat_entry_payload(ar.entries[3], dec));
     CHECK(dec.size == sizeof(a) && memcmp(dec.data, a, sizeof(a)) == 0);
 
-    /* Bytes after the last entry (ST*.DBS) survive a rebuild */
-    Buffer tailed;
-    tailed.append(pkg.data, pkg.size);
-    for (int i = 0; i < 3000; i++) tailed.push((u8)(i ^ 0x5A));
-    { DatArchive a2; CHECK(dat_parse_memory(tailed.data, tailed.size, a2)); CHECK(a2.tail_off == pkg.size);
-      u8* t = dat_build(a2.entries, a2.count, n, true, tailed.data + a2.tail_off, tailed.size - a2.tail_off);
-      CHECK(t && n == tailed.size && memcmp(t, tailed.data, n) == 0);
+    /* ST*.DBS: packages laid end to end, each with its own header sector.
+       The entries of both are listed, and a rebuild gives the same bytes. */
+    PkgEntry e2[] = { { 0, b, 12, 0x9500, 0x6B, 0, 0 }, { 0, a, 3000, 0x1500, 0x6C, 0, 0 } };
+    Buffer second, run;
+    make_package(second, e2, 2, true);
+    run.append(pkg.data, pkg.size);
+    run.append(second.data, second.size);
+    { DatArchive a2; CHECK(dat_parse_memory(run.data, run.size, a2));
+      CHECK(a2.n_packages == 2 && a2.count == 6);
+      CHECK(a2.entries[3].package == 0 && a2.entries[4].package == 1 && a2.entries[5].package == 1);
+      CHECK(a2.entries[4].offset == pkg.size + DAT_SECTOR);
+      CHECK(a2.entries[5].offset == pkg.size + 2 * DAT_SECTOR && a2.entries[5].size == 3000);
+      CHECK(a2.entries[5].data && memcmp(a2.entries[5].data, a, 3000) == 0);
+      u8* t = dat_build(a2.entries, a2.count, n, true);
+      CHECK(t && n == run.size && memcmp(t, run.data, n) == 0);
       free(t); }
+    /* Bytes after the last package that are not a package are not entries */
+    for (int i = 0; i < 3000; i++) run.push((u8)0xEE);
+    { DatArchive a2; CHECK(dat_parse_memory(run.data, run.size, a2)); CHECK(a2.n_packages == 2 && a2.count == 6); }
+    /* A DC1 file is one package whatever follows it */
+    { Buffer d1, two; make_package(d1, e, 4, false);
+      two.append(d1.data, d1.size); two.append(d1.data, d1.size);
+      DatArchive a2; CHECK(dat_parse_memory(two.data, two.size, a2)); CHECK(!a2.is_dc2 && a2.count == 4 && a2.n_packages == 1); }
 
     /* Replace the compressed entry, rebuild, parse again: still 32-byte
        entries, and the new bytes come back out */
