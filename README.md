@@ -135,19 +135,26 @@ Zones and rectangles carry only X/Z, so each is drawn on the floor beneath it: t
 
 The viewer also opens the PC version of Dino Crisis 2 (GOG build). The game is told apart by the files themselves: its packages use 32-byte header entries. Nothing reads `Dino2.exe`.
 
-Only what the dinorand project has decoded is shown. A room's visible scene is not among it: neither its mesh nor its pre-rendered backgrounds are decoded, so a room appears as its logic layer.
+Only what the dinorand project has decoded is shown. A room's mesh is not among it, so a room appears as its logic layer, drawn over the pre-rendered background of the camera you pick.
 
 | File | What you get |
 |---|---|
 | Any package (`*.DAT`, `*.TEX`, `*.DBS`) | Entry tree, hex view, Save Selected, Export Decompressed, Import / Replace, Save As |
 | `E*.DAT`, `WEP_*.DAT`, `DOOR*.DAT`, `KOF_*.DAT` and other model packages | The model in its bind pose in the 3D viewer, with OBJ, SMD and GLB export. An enemy's skin is taken from the `.TEX` of the same name in the same folder (`E00.TEX` for `E00.DAT`). `WEP_P000.DAT` and `WEP_P100.DAT` carry no skin and are shown with `WP00A.DAT` / `WP10A.DAT` from the same folder as a stand-in (alternate skin) |
-| `ST*.DAT` | **Scene**: collision polygons, zones, doors with their destination room, triggers, item pickups, enemy spawns and markers, drawn as an overlay (O). **F4**: the room script. One node per section of the room, each opening as hex |
+| `ST*.DAT` | **Scene**: cameras, collision polygons, zones, doors with their destination room, triggers, item pickups, enemy spawns and markers, drawn as an overlay (O). **K** shows the room through a game camera, on its background (see below). **F4**: the room script. One node per section of the room, each opening as hex |
+| `ST*.DBS` | One **Background** node per camera of the room: the 320x240 picture, with **M** cycling its mask tiles (off, tinted over the picture, alone). Under it, the package's entries: mask table, JPEG (Save Selected writes a `.jpg`), and where present the palette and the mask tiles or an 8-bit picture |
 | Textures and palettes in any package | The image panel. A texture that a model of the same package samples is decoded with that model's depth and CLUT (**C** switches to one palette). A palette shorter than 256 colours makes the texture 4-bit; **Up/Down** steps through its 16-colour sub-palettes |
 | `TITLE.DAT`, `*.PXL` | 320x240 pictures |
 | `MS_*.DAT`, `ME_*.DAT`, `MF_*.DAT` | Each music track listed; Save Selected writes it as an `.mp3`. There is no MP3 playback |
 | `Speech\NNNN.dat` | Plays as audio (the files are WAV) |
 
-Not available for Dino Crisis 2, because the formats are not decoded: the room mesh and prop geometry, cameras and camera-switch zones, backgrounds (`ST*.DBS` holds them after its package), animation, message text, sound effects, saves, and the weapon editor (the weapon data is in the executable). `SC*.DAT`, `MAP*.DAT`, `ITEM.DAT`, `DEMO*.TRG` and room sections 0, 3, 4, 6, 8, 9 and 10 open as hex.
+**Cameras and backgrounds.** Opening `ST101.DAT` also reads `ST101.DBS` from the same folder; without it the cameras work but have no picture. In the Scene, **K** / **Shift+K** steps through the room's cameras, and picking a camera in the overlay tree does the same. The view is then the game's: the camera's background fills the 4:3 frame and the collision outline, doors, triggers, items and spawns are projected onto it. Dragging the mouse leaves the shot (**J** returns), and the scroll wheel widens the view around the frame.
+
+The height of the ground is not decoded, so the flat shapes are drawn at the floor of the camera's zone, 1000 units a floor. **PgUp** / **PgDn** raise and lower them by 100 units (**Shift**: by a floor) until they sit on the painted floor; the HUD shows the height in game units. A camera that no zone switches to (the script sets it, or nothing does) starts at height 0. A room on several levels fits one level at a time.
+
+The overlay tree lists each camera with the number of zones that switch to it, and draws those zones dashed in the camera's colour. Zones of slot 6, which the game's sound code reads, are listed with the slot 7 zones as "Sound zone".
+
+Not available for Dino Crisis 2, because the formats are not decoded: the room mesh and prop geometry, animation, message text, sound effects, saves, and the weapon editor (the weapon data is in the executable). `SC*.DAT`, `MAP*.DAT`, `ITEM.DAT`, `DEMO*.TRG` and room sections 0, 4 and 8 open as hex.
 
 Limits of what is shown:
 
@@ -156,6 +163,9 @@ Limits of what is shown:
 - A texture no model samples (every room texture) is shown with the palette stored after it and, at 4-bit, its first sub-palette; which one the game uses is not known.
 - `M_RESULT.DAT`'s model is shown with the palette stored after its texture, not the one its header names, which does not fit that texture.
 - Room names are in the executable, so the tree shows file names.
+- A background's mask tiles are shown flat; their depth values are not used. In the camera view the background is the picture alone, so the overlay is drawn over things that would hide it in the game.
+- Camera roll (36 of 1169 cameras) is applied; which way it turns rests on one background (ST504, camera 5) and has not been checked in the game.
+- Walking the player (WASD) on a Dino Crisis 2 shot switches camera at the first zone that holds it; the zone's floor range and the cameras the script sets are not followed.
 
 ## Building
 
@@ -270,7 +280,17 @@ The room initialization script (ptr[5]) uses a multi-threaded virtual machine:
 
 Sources are the dinorand project's documents; `K<n>` is a row of its Dino Crisis 2 registry. Everything below was checked against all files of the GOG build by `tests/dc2_corpus.cpp`.
 
-**Package.** As the DC1 archive, with 32-byte header entries: the 16 bytes of a DC1 entry followed by 16 zero bytes. Unused header slots are `"dummy header    "` plus 16 zeros, and payload padding is zeros. Types: 0 data, 1 texture, 2 palette, 3 sound bank, 4 MP3 stream, 5 LZSS data, 6 LZSS texture, 7 unknown, 8 LZSS texture. Types 1 and 6 are block-tiled like DC1 textures; type 8 is stored row by row. For data entries the first word after the size is the address the entry is loaded at, and every pointer inside the entry is relative to it. `.TEX` files are ordinary packages. `ST*.DBS` is a package followed by more data (the backgrounds, not decoded).
+**Package.** As the DC1 archive, with 32-byte header entries: the 16 bytes of a DC1 entry followed by 16 zero bytes. Unused header slots are `"dummy header    "` plus 16 zeros, and payload padding is zeros. Types: 0 data, 1 texture, 2 palette, 3 sound bank, 4 MP3 stream, 5 LZSS data, 6 LZSS texture, 7 unknown, 8 LZSS texture. Types 1 and 6 are block-tiled like DC1 textures; type 8 is stored row by row. For data entries the first word after the size is the address the entry is loaded at, and every pointer inside the entry is relative to it. `.TEX` files are ordinary packages.
+
+**Backgrounds** (`ST*.DBS`, K142). The file is a run of complete packages laid end to end, one per camera of the room: 1169 packages in 89 files, tiling each file exactly (`st80504.DBS` is empty). A package holds:
+
+| Entry | Type | Contents |
+|---|---|---|
+| 0 | 0 | Mask table: `u32 count`, then `count` x `{u8 tile_x, u8 tile_y, s16 depth}`. The tile is at pixel `tile_x * 16`, `(tile_y & 0xF) * 16` |
+| 1 | 0 | A JFIF picture, 320x240 |
+| 2 | 2 | Palette at VRAM (0, 496). Absent, with entry 3, in 361 packages |
+| 3 | 0 | The mask tiles' pixels, LZSS; the header field that elsewhere is the load address holds the unpacked size. One 18x18 cell of 16-bit pixels per table record, row by row: the 16x16 tile with a 1-pixel border. A pixel is opaque where `0x8000` is set (779 packages) |
+| 3 | 8 | Instead of mask tiles: an 8-bit picture for VRAM (320, 0), 256x448 or 256x32, stored row by row. These packages have no mask tiles (29 packages) |
 
 **Room** (`ST*.DAT`, the type 5 entry, loaded at `0x5E0000`). The blob starts with 12 absolute pointers; a null pointer means the room has no such section, and a section runs to the next higher pointer.
 
@@ -279,18 +299,27 @@ Sources are the dinorand project's documents; `K<n>` is a row of its Dino Crisis
 | 0 | Draw mesh | no |
 | 1 | Markers: `u16 count, u16`, then 20-byte records `{u16 1, u16 1000, u32 id, s16 x, y, z, u16 0x8000, u16, u16}` | yes |
 | 2 | Collision polygons | yes |
-| 3 | Cameras | no |
+| 3 | Camera-switch zones | yes |
 | 4 | Table of unknown purpose (36 rooms) | no |
 | 5 | Script | yes |
-| 6 | Camera-switch zones | no |
+| 6 | Zones read by the sound-effect code | yes |
 | 7 | Zones (79 rooms) | corners only |
 | 8 | Prop geometry (61 rooms) | no |
-| 9, 10 | Unknown | no |
+| 9 | Camera table | yes |
+| 10 | `.DBS` directory: where each camera's background is | yes |
 | 11 | End of the blob | |
 
 Slot 2: `u8 count, u8 count2, u16 0, u32 offset2`, then `count` record offsets relative to the slot. A record is `u8 flags, u8 npoints, u8 index, u8 param`, 4 unknown bytes, `npoints` u32 attribute words, then `npoints + 1` pairs of `s16 x, z` whose last repeats the first: 12 + 8 x npoints bytes. `offset2` leads to `count2` 20-byte records that are not decoded.
 
 Slot 7: a 16-byte header whose first byte is the zone count, then 32-byte records: four `s16 x, z` corners, a `u16` offset to the zone's own data, and 14 more bytes. Only the corners are read.
+
+Slot 9 (K143): a 16-byte header `{u32, u16 count, u16 0x1ADA, 8 bytes}`, then `count` 16-byte cameras: `s16 x, y, z` eye, `u16` projection distance, `s16 x, y, z` target, `s16` roll. The count equals the number of packages in the room's `.DBS` in every room. Slot 10 (K145) has one `{u32 sector, u32 size}` per camera: its package starts at `sector * 0x800` in the `.DBS`, so camera *i* shows background *i*.
+
+Projection, in game coordinates (y down), onto the 320x240 screen: forward = normalize(target - eye), right = normalize((0, 1, 0) x forward), down = forward x right; a point *p* is at x = 160 + d * (p - eye)·right / z and y = 120 + d * (p - eye)·down / z, with z = (p - eye)·forward and d the projection distance. Roll turns the picture about the forward axis (4096 a turn; it is 0 in 1133 of the 1169 cameras). Its sign rests on one picture, ST504's camera 5, and has not been checked in the game.
+
+Slot 3 (K144): `u32 count`, then 44-byte camera-switch zones: flags at +0 (`0x80` = off), camera at +4, floor at +6 and floor span at +7, two unknown `s16` at +8, the trigger quad (four `s16 x, z`) at +12, and at +28 a second quad the game tests for other actors under that camera. The game walks the zones in order; the first whose quad holds the player, and whose floors [floor, floor + span] hold the player's floor, selects the camera. An actor's floor is its ground height / -1000, so floor *n* is ground y from -1000 *n* down to -1000 *n* - 999. Script opcode `0x4A` forces a camera and suspends the test. Of the 1169 cameras, 684 are named by a zone.
+
+Slot 6 (K146): `u32 count`, then 20-byte records `{u8, u8 on, s8 floor, u8, four s16 x, z}`, read by the sound-effect code. They do not switch cameras.
 
 **Script** (slot 5). A stack machine. Opcodes are one byte: `0x01`-`0x03` are 6 bytes long, `0x05`-`0x08` are 4, `0x10`-`0x59` are 2; `0x04` returns. The routines are found through a table of `u32` offsets at slot + `0x1C`, relative to the table, which ends where the first routine begins. `0x05 <mode> <s16>` pushes a value; mode 1 is a variable, 2 a stack slot, 6 the room's global table, and anything else a literal.
 
@@ -348,7 +377,8 @@ The tool composites all archive textures into a single OpenGL atlas using 2D spa
 | **C** | Toggle backface culling (see-through room faces such as fences and the signs painted on them are always drawn from both sides, as the game does) |
 | **O** | Toggle overlay visualization and its elements panel |
 | **H** | Show/hide unplaced (unused) room sections |
-| **K** / **Shift+K** | Next / previous game camera shot (its view, field of view and sections) |
+| **K** / **Shift+K** | Next / previous game camera shot (its view, field of view and sections). In a Dino Crisis 2 room the shot is drawn on the camera's background |
+| **PgUp** / **PgDn** | Dino Crisis 2 rooms: raise / lower the overlay's flat shapes by 100 units (**Shift**: 1000, one floor) |
 | **WASD** / **Arrow keys** | On a shot, walk the player the camera follows (**Shift**: run); W toggles wireframe only when no shot is selected |
 | **J** | Back onto the shot after orbiting away or scrolling |
 | **I** | Toggle room scene lights |
