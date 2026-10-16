@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-RaptorScope is a native Win32 + OpenGL 1.1 viewer/editor for Dino Crisis (1999 PC) `.DAT` archives. It covers rooms (RDT), EMD characters, textures, palettes, VAG/SEQ audio, SCD scripts, saves and MPEG video, with OBJ/SMD/GLB export. This repo (`DexeTech/RaptorScope`) is a fork of `coreynguyen/RaptorScope`. Work happens on `dev`, and PRs go to `main`.
+RaptorScope is a native Win32 + OpenGL 1.1 viewer/editor for Dino Crisis (1999 PC) `.DAT` archives. It covers rooms (RDT), EMD characters, textures, palettes, VAG/SEQ audio, SCD scripts, saves and MPEG video, with OBJ/SMD/GLB export. It also opens the decoded parts of Dino Crisis 2 (PC): packages, textures, models, and a room's collision, zones and script (see **Dino Crisis 2** below). This repo (`DexeTech/RaptorScope`) is a fork of `coreynguyen/RaptorScope`. Work happens on `dev`, and PRs go to `main`.
 
 [README.md](README.md) is the reference for file formats, SCD opcodes, overlay colours and key bindings. [EXPORTING.md](EXPORTING.md) covers GLB export. [TODO.md](TODO.md) lists unimplemented menu items. Read the relevant README section before changing a parser.
 
@@ -21,8 +21,10 @@ The live workflow on this machine is MSBuild with the VS project. The project pi
 
 ## Tests and verification
 
-- **Automated tests:** the only one is the GLB fixture: `tests/export_fixture.cpp` and `tests/check_glb.py`, run as described in EXPORTING.md. It needs g++ and NumPy, and neither is installed here. It is currently stale (T1 below).
-- **Parsers and rendering:** there are no tests. Correctness is checked against real game DATs, which are not in the repo, and against the user's screenshots and visual QA.
+- **Automated tests:**
+  - The GLB fixture: `tests/export_fixture.cpp` and `tests/check_glb.py`, run as described in EXPORTING.md. It needs g++ and NumPy, and neither is installed here. It is currently stale (T1 below).
+  - Dino Crisis 2: `tests/test_dc2.cpp` builds its inputs in code and runs anywhere (it is in the Linux CI job). `tests/dc2_corpus.cpp` and `tests/check_dc2_corpus.py` read a real install and compare with dinorand's readers; see **Dino Crisis 2**.
+- **DC1 parsers and rendering:** there are no tests. Correctness is checked against real game DATs, which are not in the repo, and against the user's screenshots and visual QA.
   - A successful build does not show that a rendering or format change is right. Say what still needs checking in the viewer, and name the room (for example ST10A, ST103 or ST112).
 - Never commit game assets, built exes or exported GLBs. `bin/` is git-ignored.
 
@@ -37,6 +39,7 @@ The code is in three layers: `core/` → `formats/` → `ui/`. `core/` and `form
   - `mesh` covers RDT layout, the room/door/EMD parsers, SCD script scanning for the overlay, animation, camera shots and OBJ/SMD/GLB export. It is the core of the reverse-engineering work.
   - `scd` is the disassembler shown in the SCD panel (F4).
   - `tim` handles TIM/IMD images, `save_editor` handles save files and `video` handles MPEG.
+  - `dc2_room`, `dc2_scd` and `dc2_model` (one header, `dc2.h`) read Dino Crisis 2.
 - **`ui/`:**
   - `app.cpp` has the window, theme and menus, the archive tree, entry classification and the atlas builder (`upload_archive_texture`).
   - `panels.cpp` has every panel's paint and input code. The largest is `ViewerPanel3D`: rendering, overlay, camera shots, walk mode and picking.
@@ -67,6 +70,25 @@ The code is in three layers: `core/` → `formats/` → `ui/`. `core/` and `form
   - depth = `(tp >> 7) & 3`, where 0 = 4bpp, 1 = 8bpp, 2 = 16bpp
 - **CLUT:** `x = (clut & 0x3F) * 16`, `y = (clut >> 6) & 0x1FF`.
 - **Atlas:** `ViewerPanel3D::slice_map[row * 65 + slot]` gives a compact slice for each CLUT row. Slot 0 is 8bpp and slots 1–64 are the 4bpp sub-palettes, kept separate so 4bpp and 8bpp never collide.
+
+### Dino Crisis 2
+
+DC2 is detected by content, in `dat_parse_memory` (`DatArchive::is_dc2`): its header entries are 32 bytes. Its type numbers 5 and 6 are parsed as `DAT_LZSS0` and `DAT_LZSS1`, so the DC1 code for compressed data and textures applies; `DatEntry::raw_type` keeps the number from the file and `load_base` the address the entry loads at. The DC2 readers fill the DC1 structures (`EmdModel`, `Mesh`, `RdtSceneOverlay` with `dc2 = 1`, `ScdDisasm` with `dc2 = true`), so the viewer, the overlay tree and the exporters need little DC2 code: `App::build_tree` and `on_entry_select` each branch once, to `dc2_tree_add` and `dc2_entry_select`.
+
+- **Source of the formats.** The dinorand project's documents and tools, cited in comments by registry row (`K<n>`) or file name where a DC1 comment would cite a DINO.exe address. The viewer reads no executable. README's **Dino Crisis 2** sections list what is and is not decoded. Do not add a DC2 format from a guess: it has to be in dinorand's documents or checked on every file of the game.
+- **Where the code departs from dinorand, on purpose.** Slot 2's header, the vertex-to-bone rule, quad order, the `.TEX` layout and the 4096 limit on a part's offset; each is explained in a comment where it is read and listed in [DC2-DINORAND-HANDOFF.md](DC2-DINORAND-HANDOFF.md).
+- **Unit tests** (no game needed):
+  ```sh
+  g++ -std=c++11 -Iinclude -D_snprintf=snprintf tests/test_dc2.cpp src/formats/dat.cpp src/formats/dc2_room.cpp src/formats/dc2_scd.cpp src/formats/dc2_model.cpp src/core/lzss.cpp -o test_dc2 && ./test_dc2
+  ```
+- **Corpus check** (needs the game and a dinorand checkout; prints `SKIPPED` and exits 0 without them):
+  ```sh
+  g++ -std=c++11 -O1 -Iinclude -D_snprintf=snprintf tests/dc2_corpus.cpp src/formats/dat.cpp src/formats/dc2_room.cpp src/formats/dc2_scd.cpp src/formats/dc2_model.cpp src/core/lzss.cpp -o dc2_corpus
+  DINORAND_DC2_DIR=<install> ./dc2_corpus > corpus.tsv
+  DINORAND_ROOT=<dinorand> python3 tests/check_dc2_corpus.py corpus.tsv
+  ```
+  It compares every package, entry, room record and model with dinorand's readers and ends with a table of totals against the documented figures. Run it after any change to `dat.cpp` or a `dc2_*.cpp`. Never commit its output: it is derived from game files.
+- **The viewer side is build-checked only.** Nothing DC2 has been looked at in the running program yet; B40–B43 say what to look at.
 
 ### Naming traps
 
@@ -203,6 +225,13 @@ Ordered with memory safety and data loss first.
   - The panel's field names (Fire Mode, Ammo Type, Spread, Recoil, Power, Range, Blast…) and its per-record weapon names are therefore unsupported.
   - wep10–13 have a second record table after the pointer table, which the panel never shows.
 - **B39** **Save editor key-item flags use the wrong store (verify).** `DC_FLAG_ITEMS` sets bit groups in the 96-byte event-flag window at gs+72. Held items are stored one bit per item id in a 32-byte bank at gs+240, outside that window. The listed bit sets are event flags that happen to change at those points in the game, so toggling one may not give or remove the item.
+- **B40** **DC2 model orientation is assumed (verify).** `dc2_parse_model` negates all three axes, as the DC1 character parser does, and the viewer draws it with DC1's winding. No document states DC2's handedness. Open `E00.DAT` (with `E00.TEX` beside it): the raptor should stand upright, textured, not mirrored and not inside out. Rendered offline from the parser's output it is whole and correctly textured, which settles the bone, quad and UV rules but not mirroring.
+- **B41** **DC2 model texturing in the viewer has never been seen (verify).** `dc2_show_model` hands `upload_archive_texture` the `.TEX` archive and one CLUT, then computes the UV crop by hand. Check `E00.DAT` and `E40.DAT`, each with its `.TEX` beside it. Player models (`WEP_P*.DAT`, tpage `0x8E`, page (896, 0)) have no matching texture in their package and open untextured; where their skin is stored is unknown. 16 packages have a model with no texture of its own: E00, E90, M_TITLE, RES00–02, SC08, SC09, SC11, SC19, SC40, SC41, SC46, SC49, WEP_P000, WEP_P100.
+- **B42** **DC2 door and item corners are read by analogy (verify).** dinorand documents the four (x, z) corners at record +4..+0x12 for triggers (0x31) only. `dc2_scd.cpp` reads the same record bytes for doors (0x30) and item pickups (0x35). Plotted offline, ST102's doors sit at the ends of its collision outline, which supports it. Check ST101's two doors (to ST102 and ST100) and an item room in the viewer.
+- **B43** **The DC2 room view has never been seen (verify).** The view is framed by a mesh of zero-area triangles along the collision outline (`dc2_room_outline_mesh`), the overlay is switched on, and the overlay tree shows DC2 names. Check ST101 and ST102: something is visible on opening, the tree lists doors with destinations, selecting an item highlights it, and F4 lists the script.
+- **B44** **Two DC2 collision records are longer than their points.** ST702's record 2 has 588 bytes and ST904's record 9 has 12 bytes beyond 12 + 8 x points; they are not read. The slot's second block (20-byte records, 54 of them in 10 rooms), a record's bytes +4..+7 and its per-point attribute words are not decoded either.
+- **B45** **DC2 records with computed positions are not drawn.** `dc2_room_overlay` leaves out a door, trigger, item or spawn when a corner or coordinate is not a literal push. In ST102, 5 of 6 spawns take z from the room's global table (mode 6), which is in the file at slot 5 + 0x1C + the u32 at slot 5 + 0x0C (K64) and could be resolved.
+- **B46** **DC2 texture depth is guessed.** Nothing in a package says whether a texture is 4bpp or 8bpp. The image panel uses DC1's rule (a palette of 32 bytes or less means 4bpp), and the user corrects it with the depth keys.
 
 ### Contradictions (code vs README, comments or other code)
 
@@ -254,6 +283,8 @@ Ordered with memory safety and data loss first.
 - **C13** **Cited DINO.exe addresses are from another build (verify).** The handler addresses in comments and README come from a build other than the GOG "Classic REbirth" exe. In that exe, code in 0x422000–0x42BE92 is 0x160 lower than the cited address (0x42A96D is 0x42A80D), and the data addresses (0x657698/0x6576A0, 0x645FA8, 0x62A4C8) do not carry over. Check which build an address is from before looking it up.
 - **C14** **`P40` is labelled "T-Rex Boss" (verify).** `app.cpp`'s character name table calls P40 that, but the developer path manifest lists 186 player-style motions for it, and the T-Rex is E10/E11.
 - **C15** **DAT entry type 5 is labelled "SEQ music sequence" (verify).** `dat.h`, `dat.cpp` and the tree label say so, but the label rests on `parse_seq_header` accepting a non-zero resolution and a plausible tempo. In the 464 DAT files of the PC game, all 294 type 5 entries pass that test and none contains a SEQ magic.
+- **C16** **DC2 overlay data sits in DC1-named fields.** A DC2 room's spawns (0x1A) are in `overlay.items` and its slot-1 markers in `overlay.enemies`, following C1's swapped names; doors, triggers and item pickups are `RDT_ZONE_TRIGGER` zones whose `target_index` (`DC2_ZONE_*`) was chosen to reuse a DC1 zone colour.
+- **C17** **`dc1_export` exports DC2 models too.** The name, its usage line and EXPORTING.md's title still say DC1.
 
 ### Performance and silent limits
 
@@ -278,6 +309,7 @@ Ordered with memory safety and data loss first.
   - It triggers on registry disk names containing "Msft"/"Virtual", and on GL strings containing "D3D" or "Mesa" or vendor "Microsoft" (which GLon12 reports).
   - When it misfires, lighting, culling and textures are turned off.
 - **P7** **Walk mode is simplistic.** It keeps a single `walk_floor_y` (no stairs or levels, even though `floor_below` exists for camera shots) and uses a fixed dt of 0.016 s whatever the timer rate.
+- **P9** **DC2 fixed limits.** 64 routines per script (the largest room has 30), 32 pushes per record (a door uses 19), 128 collision polygons and 1024 points (largest room: 32 and 210), 64 zones shared by slot-7 zones, doors, triggers and items (largest room: 33), 64 spawn records scanned and 32 drawn (ST202 has 48 records; the most drawn in one room is 13), 50 model parts (the largest model has 21). Anything beyond is dropped silently, as in P5. `App::build_tree` decompresses every DC2 LZSS0 entry once to label it.
 - **P8** **Save editor setup re-enters the app.** `SavePanel_FinalizeDark` pumps messages from inside `switch_panel` before the save is loaded, so input during its progress popup re-enters the app.
 
 ### Messy and dead code
@@ -319,4 +351,5 @@ Ordered with memory safety and data loss first.
 
 ### Tests
 
+- **T2** **Nothing tests the DC2 viewer code.** `app.cpp` and `panels.cpp` are Win32 and are only compiled. The DC2 tests cover `dat.cpp` and `dc2_*.cpp`; `AudioPanel::load_wav` on DC2 voice files is covered only by the corpus check confirming that all 305 are PCM WAV with a data chunk that fits.
 - **T1** **The GLB fixture test is stale.** `tests/check_glb.py` predates the metres conversion in commit `1a02052`. It compares GLB positions in metres with `viewer_positions.txt`, which is in game units. Scale one side by 0.001.
