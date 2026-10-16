@@ -5,7 +5,7 @@
     DINORAND_ROOT=<dinorand checkout> python3 tests/check_dc2_corpus.py corpus.tsv
 
 The oracles are dinorand's tools/dc2_re scripts (dc2pkg, decode_s1_s7,
-decode_s2, decode_script) and its dcmtool.  Where an oracle is known to be
+decode_s2, decode_script, decode_cameras, decode_dbs) and its dcmtool.  Where an oracle is known to be
 wrong for a check, the check says so and uses the rule written out here
 instead.  Stdlib only.  Reads the install, writes nothing.
 
@@ -22,6 +22,7 @@ import os
 import struct
 import subprocess
 import sys
+import types
 import zlib
 
 BASE = 0x005E0000   # load address the oracles hard-code for a room blob
@@ -50,6 +51,8 @@ def main():
     import decode_s1_s7
     import decode_s2
     import decode_script
+    import decode_cameras
+    import decode_dbs
 
     rows = collections.defaultdict(list)
     for l in lines:
@@ -62,7 +65,8 @@ def main():
     print("# Inputs (SHA-256)")
     files = {}
     for r in rows["PKG"]:
-        raw = open(os.path.join(data_dir, r[0]), "rb").read()
+        path = os.path.join(data_dir, r[0])     # the original of a patched file, as the corpus tool
+        raw = open(path + ".bak" if os.path.exists(path + ".bak") else path, "rb").read()
         files[r[0]] = raw
         print("%s  Data/%s" % (hashlib.sha256(raw).hexdigest(), r[0]))
     for r in rows["WAV"]:
@@ -80,6 +84,10 @@ def main():
             full = dc2pkg.parse(raw)[0] if len(raw) >= 2048 else []
         except Exception:
             full = []
+        if name.upper().endswith(".DBS"):
+            # dc2pkg reads one package; a .DBS is a run of them (decode_dbs)
+            full = [types.SimpleNamespace(type=t, size=sz, raw_off=off, data=raw[off:off + sz], decomp=None)
+                    for _, pk in decode_dbs.packages(raw)[0] for t, sz, off, _ in pk]
         # dc2pkg keeps zero-size entries (ITEM.DAT's all-zero header gives 64
         # of them); the viewer ends the table there, as dinorand's C#
         # GianPackage does.
@@ -185,6 +193,66 @@ def main():
             undecoded.append(name)
     report.note("slot 7 zones", "count byte set but not read as zones (first data offset is not "
                 "16 + 32 x count): " + (", ".join(undecoded) or "none"))
+
+    # ---- cameras, camera zones, sound zones (decode_cameras) ----------
+    cam_rows, cz_rows, sz_rows = by_file("CAM"), by_file("CZ"), by_file("SZ")
+    ints = lambda row, a, b: [int(v) for v in row[a:b]]
+    pairs = lambda v: [[v[i], v[i + 1]] for i in range(0, len(v), 2)]
+    oracle_cams = {}
+    for name, d in room_blob.items():
+        want = decode_cameras.decode(d)
+        oracle_cams[name] = want["cameras"]
+        report.check("cameras (slot 9, 10)", name,
+                     [(ints(c, 2, 5), int(c[5]), ints(c, 6, 9), int(c[9]), int(c[10]), int(c[11]))
+                      for c in cam_rows.get(name, [])],
+                     [(c["eye"], c["proj"], c["target"], c["roll"], c["dbs_offset"], c["dbs_size"])
+                      for c in want["cameras"]])
+        report.check("camera zones (slot 3)", name,
+                     [(ints(z, 2, 7), ints(z, 7, 9), pairs(ints(z, 9, 17)), pairs(ints(z, 17, 25)))
+                      for z in cz_rows.get(name, [])],
+                     [([z["flags"], z["camera"], z["b5"], z["floor"], z["floor_span"]], z["w8"], z["trigger"],
+                       z["visible"]) for z in want["zones"]])
+        report.check("sound zones (slot 6)", name,
+                     [(ints(z, 2, 6), pairs(ints(z, 6, 14))) for z in sz_rows.get(name, [])],
+                     [([z["b0"], z["on"], z["floor"], z["b3"]], z["quad"]) for z in want["sound_zones"]])
+
+    # ---- backgrounds (decode_dbs) -------------------------------------
+    bg_rows, bgt_rows = by_file("BG"), by_file("BGT")
+    shapes, n_bg, n_tiles = collections.Counter(), 0, 0
+    for r in rows["PKG"]:
+        name = r[0]
+        if not name.upper().endswith(".DBS") or r[2] == "not-a-package":
+            continue
+        raw = files[name]
+        pk, end = decode_dbs.packages(raw)
+        report.check("background packages tile the file", name, (int(r[7]), end), (len(pk), len(raw)))
+        want, want_tiles = [], []
+        for p in pk:
+            b = decode_dbs.background(raw, p)
+            kind = 0 if len(p[1]) < 4 else 1 if p[1][3][0] == 0 else 2
+            px = b["cells"] if kind == 1 else b["extra"][1] if kind == 2 else b""
+            w, h = decode_dbs.jpeg_size(b["jpeg"])
+            want.append((p[0], kind, len(b["jpeg"]), "%08x" % zlib.crc32(b["jpeg"]), w, h, len(b["tiles"]),
+                         len(px), "%08x" % zlib.crc32(px)))
+            want_tiles.append(",".join("%d,%d,%d" % t for t in b["tiles"]))
+            shapes[tuple(e[0] for e in p[1])] += 1
+            n_tiles += len(b["tiles"])
+            if kind == 1:
+                report.check("mask cells are 648 bytes a tile", "%s#%d" % (name, len(want) - 1), len(px),
+                             648 * len(b["tiles"]))
+        n_bg += len(pk)
+        mine = [(int(b[2]), int(b[4]), int(b[5]), b[6], int(b[7]), int(b[8]), int(b[9]), int(b[10]), b[11])
+                for b in bg_rows.get(name, [])]
+        report.check("backgrounds", name, mine, want)
+        report.check("mask tiles", name, [",".join(t[3:]) for t in bgt_rows.get(name, [])], want_tiles)
+        # camera i of the room shows package i
+        room = name[:-4].upper() + ".DAT"
+        if room in oracle_cams:
+            report.check("camera i shows background i", name,
+                         [(int(c[10]), int(c[11])) for c in cam_rows.get(room, [])],
+                         [(p[0], sum((e[1] + 2047 & ~2047) for e in p[1]) + 2048) for p in pk])
+        else:
+            report.note("backgrounds", "%s has no room file" % name)
 
     # ---- script -------------------------------------------------------
     doors, trigs, items, spawns = by_file("DOOR"), by_file("TRIG"), by_file("ITEM"), by_file("SPAWN")
@@ -328,6 +396,12 @@ def main():
         ("valid models", "133", len(rows["MODEL"]), "K127"),
         ("music files / MP3 payloads", "65 / 141", "%d / %d" % (len(music), sum(len(mp3[n]) for n in music)), "K96"),
         ("voice files", "305", len(rows["WAV"]), "VOICE-DECODE-REPORT.md"),
+        ("cameras", "1169", len(rows["CAM"]), "K143"),
+        (".DBS files / backgrounds", "89 / 1169", "%d / %d" % (len(bg_rows), len(rows["BG"])), "K142"),
+        ("background shapes", "779 / 361 / 29", "%d / %d / %d" % (shapes[(0, 0, 2, 0)], shapes[(0, 0)],
+                                                                    shapes[(0, 0, 2, 8)]), "K142"),
+        ("mask tiles", "107779", n_tiles, "K142"),
+        ("camera zones", "788", len(rows["CZ"]), "decode_cameras.py census"),
     ]
     print("\n# Audit: measured totals against dinorand's documents")
     print("%-28s %-24s %-24s %-8s %s" % ("figure", "documented", "measured", "", "source"))

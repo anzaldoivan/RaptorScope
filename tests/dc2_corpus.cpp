@@ -125,18 +125,49 @@ static void room(const char* name, const u8* d, size_t n, u32 base)
         printf("\n");
     }
 
+    static Dc2Camera cams[256];
+    int ncam = dc2_room_cameras(d, n, dir, cams, 256);
+    for (int i = 0; i < ncam; i++) {
+        const Dc2Camera& c = cams[i];
+        printf("CAM\t%s\t%d\t%d\t%d\t%d\t%u\t%d\t%d\t%d\t%d\t%u\t%u\n", name, i, c.eye[0], c.eye[1], c.eye[2],
+               c.proj, c.target[0], c.target[1], c.target[2], c.roll, c.dbs_off, c.dbs_size);
+    }
+    static Dc2CamZone cz[256];
+    int ncz = dc2_room_cam_zones(d, n, dir, cz, 256);
+    for (int i = 0; i < ncz; i++) {
+        const Dc2CamZone& z = cz[i];
+        printf("CZ\t%s\t%d\t%u\t%u\t%u\t%u\t%u\t%d\t%d", name, i, z.flags, z.camera, z.b5, z.floor, z.span,
+               z.w8[0], z.w8[1]);
+        for (int c = 0; c < 4; c++) printf("\t%d\t%d", z.x[c], z.z[c]);
+        for (int c = 0; c < 4; c++) printf("\t%d\t%d", z.vx[c], z.vz[c]);
+        printf("\n");
+    }
+    static Dc2SoundZone sz[256];
+    int nsz = dc2_room_sound_zones(d, n, dir, sz, 256);
+    for (int i = 0; i < nsz; i++) {
+        printf("SZ\t%s\t%d\t%u\t%u\t%d\t%u", name, i, sz[i].b0, sz[i].on, sz[i].floor, sz[i].b3);
+        for (int c = 0; c < 4; c++) printf("\t%d\t%d", sz[i].x[c], sz[i].z[c]);
+        printf("\n");
+    }
+
     RdtSceneOverlay* ov = new RdtSceneOverlay();
     dc2_room_overlay(d, n, base, *ov);
-    printf("OVL\t%s\t%d\t%d\t%d\t%d\t%d\n", name, ov->n_polys, ov->n_poly_pts, ov->n_zones,
-           ov->n_items, ov->n_enemies);
+    printf("OVL\t%s\t%d\t%d\t%d\t%d\t%d\t%d\n", name, ov->n_polys, ov->n_poly_pts, ov->n_zones,
+           ov->n_items, ov->n_enemies, ov->n_cam_threads);
     delete ov;
 }
 
 static void package(const char* dirpath, const char* name)
 {
     char path[1024];
-    snprintf(path, sizeof(path), "%s/%s", dirpath, name);
+    /* A file dinorand has patched keeps its original beside it as
+       <name>.bak; dinorand's readers take that one, and so does this */
+    snprintf(path, sizeof(path), "%s/%s.bak", dirpath, name);
     FILE* f = fopen(path, "rb");
+    if (!f) {
+        snprintf(path, sizeof(path), "%s/%s", dirpath, name);
+        f = fopen(path, "rb");
+    }
     if (!f) return;
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
     u8* raw = (u8*)malloc(sz > 0 ? sz : 1);
@@ -160,6 +191,24 @@ static void package(const char* dirpath, const char* name)
            same ? "rebuild-same" : "rebuild-differs", (unsigned long)built_size, (unsigned long)first_diff,
            a.n_packages);
     free(built);
+
+    /* ST*.DBS: one background per package */
+    for (int p = 0; ext_is(name, ".dbs") && p < a.n_packages; p++) {
+        Dc2Background bg;
+        if (!dc2_background(a, p, bg)) { printf("BG\t%s\t%d\tnot-a-background\n", name, p); continue; }
+        const DatEntry* e = a.entries + bg.first;
+        static Dc2MaskTile tiles[DC2_MAX_MASK_TILES];
+        int nt = dc2_mask_tiles(e[0].data, e[0].size, tiles, DC2_MAX_MASK_TILES);
+        Buffer cells;
+        if (bg.kind == DC2_BG_MASKED) dc2_mask_cells(e[3], cells);
+        else if (bg.kind == DC2_BG_PICTURE) dat_entry_payload(e[3], cells);
+        printf("BG\t%s\t%d\t%u\t%d\t%d\t%u\t%08llx\t%d\t%d\t%d\t%lu\t%08llx\n", name, p, bg.offset,
+               bg.first, bg.kind, e[1].size, crc(e[1].data, e[1].size), bg.w, bg.h, bg.n_tiles,
+               (unsigned long)cells.size, crc(cells.data, cells.size));
+        printf("BGT\t%s\t%d\t%d", name, p, nt);
+        for (int i = 0; i < nt; i++) printf("\t%d,%d,%d", tiles[i].x, tiles[i].y, tiles[i].depth);
+        printf("\n");
+    }
 
     for (int i = 0; i < a.count; i++) {
         const DatEntry& e = a.entries[i];
