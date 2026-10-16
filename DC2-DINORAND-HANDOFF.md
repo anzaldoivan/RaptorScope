@@ -61,7 +61,7 @@ Confidence labels: **corpus** = holds on every file of the install; **visual** =
 
 - **Target:** `docs/reference/dc2/format/FORMAT-DC2.md` (reconciles its "4-entry package" with K112's JPEG carve).
 - **Proposed wording:** "`ST*.DBS` is a DC2 package (2 or 4 entries) followed, from the next sector, by data the header does not describe."
-- **Evidence:** 86 of 90 `.DBS` files are longer than their package (ST000: 401408 bytes after it, containing 4 JPEG start markers). A rebuild that writes only the package drops them; one that appends the tail reproduces all 90.
+- **Evidence:** 89 of the 90 `.DBS` files parse as a package (22 with 2 entries, 67 with 4; `st80504.DBS` is an empty file), and 86 of those are longer than their package (ST000: 401408 bytes after it, containing 4 JPEG start markers). A rebuild that writes only the package drops them; one that appends the tail reproduces all 89.
 - **Confidence:** corpus. The tail's layout was not examined.
 
 ## 9. Music
