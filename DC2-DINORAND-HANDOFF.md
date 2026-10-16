@@ -57,12 +57,16 @@ Confidence labels: **corpus** = holds on every file of the install; **visual** =
 - **Evidence:** type census over 2697 entries: 0 x 464, 1 x 321, 2 x 818, 3 x 219, 4 x 145, 5 x 291, 6 x 433, 7 x 1, 8 x 5. The five type 8 entries are entry 3 of ST000, ST004, ST005, ST110 and ST302 `.DBS`; ST000's (128 x 448 halfwords, 114688 bytes decompressed) is a picture of a patrol boat when read row by row and noise when un-tiled. Type 7 is `CORE.DAT` entry 2 (497056 bytes).
 - **Confidence:** visual for ST000; the other four were not looked at.
 
-## 8. `.DBS` is a package followed by more data
+## 8. `.DBS` is a run of packages, one per camera
 
-- **Target:** `docs/reference/dc2/format/FORMAT-DC2.md` (reconciles its "4-entry package" with K112's JPEG carve).
-- **Proposed wording:** "`ST*.DBS` is a DC2 package (2 or 4 entries) followed, from the next sector, by data the header does not describe."
-- **Evidence:** 89 of the 90 `.DBS` files parse as a package (22 with 2 entries, 67 with 4; `st80504.DBS` is an empty file), and 86 of those are longer than their package (ST000: 401408 bytes after it, containing 4 JPEG start markers). A rebuild that writes only the package drops them; one that appends the tail reproduces all 89.
-- **Confidence:** corpus. The tail's layout was not examined.
+This entry first said "a package followed by data the header does not describe". That data is simply packages 2..N: dinorand has since decoded it (K142), and the viewer now reads it the same way.
+
+- **Target:** `docs/reference/dc2/format/FORMAT-DC2.md`; nothing to change if it already follows K142.
+- **Wording:** "`ST*.DBS` is a run of complete DC2 packages laid end to end, one per camera of the room, each with its own header sector. Camera *i* of the room's slot 9 shows package *i*; slot 10 gives each package's sector and size."
+- **Evidence:** 89 of the 90 `.DBS` files (`st80504.DBS` is empty) hold 1169 packages that tile each file exactly, and rebuilding them package by package reproduces all 89 byte for byte. Every room's camera count equals its package count, and every slot-10 record is the offset and length of the package with the same index. Entry types per package: (0, 0, 2, 0) x 779, (0, 0) x 361, (0, 0, 2, 8) x 29; 107779 mask tiles; every JPEG is 320x240. `tests/check_dc2_corpus.py` compares all of it with `decode_dbs.py` and `decode_cameras.py`, with no differences.
+- **Effect on entry 7:** its type census counted the first package of each `.DBS` only. Over all packages there are 29 type 8 entries, not 5.
+- **Tool note:** `decode_cameras.py --json` prints the JSON and then fails, because the loop over room names also runs for the `--json` argument (`for r in args:` after the `if`/`elif`). The checker imports `decode()` instead.
+- **Confidence:** corpus.
 
 ## 9. Music
 
