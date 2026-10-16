@@ -570,6 +570,8 @@ int build_texture_atlas(const DatArchive& ar,
         const DatEntry* pal;     /* matched palette entry */
         int pal_vram_y;          /* VRAM Y of matched palette */
         int pal_rows;            /* number of palette rows (height) */
+        int own;                 /* index into pals[] of the palette that
+                                    follows the texture, -1 = it has none */
     };
     TexPalPair pairs[16];
 
@@ -578,6 +580,7 @@ int build_texture_atlas(const DatArchive& ar,
         pairs[ti].pal = 0;
         pairs[ti].pal_vram_y = clut_y_min;
         pairs[ti].pal_rows = 1;
+        pairs[ti].own = -1;
 
         /* Match palette: use the next palette entry after this texture */
         int tex_idx = texes[ti].idx;
@@ -594,6 +597,7 @@ int build_texture_atlas(const DatArchive& ar,
                     pairs[ti].pal_vram_y = pals[pi].vram_y;
                     pairs[ti].pal_rows = pals[pi].vram_h;
                     if (pairs[ti].pal_rows < 1) pairs[ti].pal_rows = 1;
+                    pairs[ti].own = pi;
                     break;
                 }
             }
@@ -613,8 +617,20 @@ int build_texture_atlas(const DatArchive& ar,
        This prevents 4bpp sub=0 (CLUT X == base_x) from colliding with 8bpp. */
     int num_sub_pals = 1;
     int clut_base_x = 0;
+    /* Dino Crisis 2: the palette a slice's CLUT lies in (index into pals,
+       -1 = none) and the index of the CLUT's first colour in it. */
+    int slice_pal[16 * 65], slice_base[16 * 65];
+    bool row_8bpp[16];
+    memset(slice_pal, -1, sizeof(slice_pal));
+    memset(slice_base, 0, sizeof(slice_base));
+    memset(row_8bpp, 0, sizeof(row_8bpp));
     if (n_pal > 0) {
         clut_base_x = pals[0].vram_x;
+        /* DC2 packages put palettes at several x on a row (WEP_P000's is
+           at x = 160), in any order: count sub-palettes from the leftmost */
+        if (ar.is_dc2)
+            for (int pi = 1; pi < n_pal; pi++)
+                if (pals[pi].vram_x < clut_base_x) clut_base_x = pals[pi].vram_x;
         int base_sub = clut_base_x / 16;
 
         int compact = 0;
@@ -637,10 +653,33 @@ int build_texture_atlas(const DatArchive& ar,
                 lay.slice_map[key8] = compact++;
 
             /* If any 4bpp face uses this CLUT, allocate 4bpp slice (slot rel+1) */
+            int key4 = row * 65 + rel + 1;  /* +1 to avoid 8bpp slot */
             if (used_is4bpp[ci]) {
-                int key4 = row * 65 + rel + 1;  /* +1 to avoid 8bpp slot */
                 if (lay.slice_map[key4] < 0)
                     lay.slice_map[key4] = compact++;
+            }
+
+            /* DC2: the palette loaded where the CLUT points, for textures
+               that have no palette of their own (see the render loop).
+               DC1 keeps the pairing by entry order alone (B28). */
+            if (!ar.is_dc2) continue;
+            int found = -1;
+            for (int pi = 0; pi < n_pal && found < 0; pi++) {
+                int ph = pals[pi].vram_h < 1 ? 1 : pals[pi].vram_h;
+                if (cx >= pals[pi].vram_x && cx < pals[pi].vram_x + pals[pi].vram_w &&
+                    cy >= pals[pi].vram_y && cy < pals[pi].vram_y + ph)
+                    found = pi;
+            }
+            if (found < 0) continue;
+            int first = (cy - pals[found].vram_y) * pals[found].vram_w + cx - pals[found].vram_x;
+            if (first + 256 > 4096) continue;
+            /* The row's one 8bpp slice goes to an 8bpp face's CLUT if any */
+            if (slice_pal[key8] < 0 || (!used_is4bpp[ci] && !row_8bpp[row])) {
+                slice_pal[key8] = found; slice_base[key8] = first;
+                if (!used_is4bpp[ci]) row_8bpp[row] = true;
+            }
+            if (used_is4bpp[ci] && slice_pal[key4] < 0) {
+                slice_pal[key4] = found; slice_base[key4] = first;
             }
         }
         num_sub_pals = compact > 0 ? compact : 1;
@@ -689,7 +728,7 @@ int build_texture_atlas(const DatArchive& ar,
        - 4bpp TPage columns: render at 4bpp with per-sub-palette variants
        The sub-pal variants only affect 4bpp regions; 8bpp regions are
        identical across all sub-palette slices (pixel-doubled). */
-    RGBA8* palette = (RGBA8*)malloc(4096 * sizeof(RGBA8));
+    RGBA8* palette = (RGBA8*)malloc(4096 * sizeof(RGBA8));   /* 16 rows of 256 */
     if (!palette) { free(rgba); return -1; }
     for (int ti = 0; ti < n_tex; ti++) {
         const DatEntry& tex = ar.entries[texes[ti].idx];
@@ -713,35 +752,16 @@ int build_texture_atlas(const DatArchive& ar,
 
         int x_off_hw = texes[ti].vram_x - min_vx;
 
-        const DatEntry* pal = pairs[ti].pal;
-        int pal_vy = pairs[ti].pal_vram_y;
-        int this_pal_rows = pairs[ti].pal_rows;
-
         /* Deswizzle once for this texture */
         size_t total_bytes = (size_t)byte_w * vh;
         u8* linear = (u8*)calloc(total_bytes, 1);
         if (!linear) continue;
         deswizzle_8bpp(pix, pix_size, linear, vw, vh);
 
-        /* Parse palette rows */
+        const DatEntry* parsed = 0;   /* the palette entry in palette[] */
         for (int pi2 = 0; pi2 < 4096; pi2++) palette[pi2] = RGBA8(0,0,0,0);
-        if (pal && pal->data && pal->size > 0) {
-            int np = (int)(pal->size / 512);
-            if (np < 1) np = 1;
-            if (np > 16) np = 16;
-            parse_palette(pal->data, pal->size, palette, np);
-        }
 
         for (int row = 0; row < total_clut_rows; row++) {
-            int abs_clut_y = clut_y_min + row;
-            int pal_row_offset = abs_clut_y - pal_vy;
-            if (pal_row_offset < 0 || pal_row_offset >= this_pal_rows) {
-                if (this_pal_rows == 1) pal_row_offset = 0;
-                else continue;
-            }
-            if (pal_row_offset >= this_pal_rows)
-                pal_row_offset = this_pal_rows - 1;
-
             for (int slot = 0; slot < 65; slot++) {
                 int map_key = row * 65 + slot;
                 int slice_idx = lay.slice_map[map_key];
@@ -751,16 +771,67 @@ int build_texture_atlas(const DatArchive& ar,
                 bool is_8bpp_slot = (slot == 0);
                 int rel_sub = is_8bpp_slot ? 0 : slot - 1;
 
+                /* The palette for this texture in this slice, and the index
+                   of the CLUT's first colour in it (base8 for 8bpp, base4
+                   for 4bpp).
+
+                   DC1: the palette that follows the texture, by row, and
+                   the sub-palette counted from the first palette's x.
+
+                   DC2: the palette that follows the texture too, with the
+                   sub-palette counted from that palette's own x (WEP_P000's
+                   weapon palette is at x = 160).  The palette loaded where
+                   the CLUT points is used when no palette follows the
+                   texture, or a 4bpp CLUT lies outside the one that does.
+                   It is not preferred, although it is what the hardware
+                   reads: the two differ for one model of the game,
+                   M_RESULT.DAT's, whose header has the CLUT at (0, 511),
+                   the palette of the "RESULT" picture.  Its page (896, 256)
+                   is a gold swirl that decodes cleanly with the palette
+                   after it (y = 510) and to noise with that one, so the
+                   game must set that model's CLUT itself. */
+                const DatEntry* pal;
+                int base8, base4;
+                int own = ar.is_dc2 ? pairs[ti].own : -1;
+                int own_sub = rel_sub;
+                if (own >= 0 && !is_8bpp_slot)
+                    own_sub = (clut_base_x + rel_sub * 16 - pals[own].vram_x) / 16;
+                bool own_fits = own >= 0 && own_sub >= 0 &&
+                                (is_8bpp_slot || own_sub * 16 < pals[own].vram_w);
+                if (slice_pal[map_key] >= 0 && !own_fits) {
+                    pal = &ar.entries[pals[slice_pal[map_key]].idx];
+                    base8 = base4 = slice_base[map_key];
+                } else {
+                    pal = pairs[ti].pal;
+                    int this_pal_rows = pairs[ti].pal_rows;
+                    int pal_row_offset = clut_y_min + row - pairs[ti].pal_vram_y;
+                    if (pal_row_offset < 0 || pal_row_offset >= this_pal_rows) {
+                        if (this_pal_rows == 1) pal_row_offset = 0;
+                        else continue;
+                    }
+                    base8 = pal_row_offset * 256;
+                    base4 = base8 + (own_fits ? own_sub : rel_sub) * 16;
+                }
+                if (pal != parsed) {
+                    for (int pi2 = 0; pi2 < 4096; pi2++) palette[pi2] = RGBA8(0,0,0,0);
+                    if (pal && pal->data && pal->size > 0) {
+                        int np = (int)(pal->size / 512);
+                        if (np < 1) np = 1;
+                        if (np > 16) np = 16;
+                        parse_palette(pal->data, pal->size, palette, np);
+                    }
+                    parsed = pal;
+                }
+
                 /* Classify 4bpp sub-palette as decal overlay vs opaque texture.
                    Decal = majority of 16 entries have STP=1 (blood splatters, overlays).
                    Opaque = most entries STP=0 (character textures, walls).
                    Only decal sub-palettes get STP alpha; opaque ones stay fully solid. */
                 bool is_4bpp_decal = false;
                 if (!is_8bpp_slot && pal && pal->data) {
-                    int actual_sub = rel_sub;
                     int stp_count = 0;
                     for (int ci = 1; ci < 16; ci++) { /* skip index 0 */
-                        size_t raw_off = (size_t)pal_row_offset * 512 + (actual_sub * 16 + ci) * 2;
+                        size_t raw_off = (size_t)(base4 + ci) * 2;
                         if (raw_off + 2 <= pal->size) {
                             u16 raw = rd_u16(pal->data + raw_off);
                             if (raw & 0x8000) stp_count++;
@@ -787,15 +858,18 @@ int build_texture_atlas(const DatArchive& ar,
 
                         if (is_8bpp_slot && is_8bpp_pal) {
                             /* 8bpp: one pixel per byte, pixel-doubled */
-                            int pal_base_8 = pal_row_offset * 256;
-                            RGBA8 c8 = palette[pal_base_8 + byte_val];
+                            RGBA8 c8 = palette[base8 + byte_val];
                             /* 8bpp index 0 is the background/mask index.
                                0x0000 already has alpha=0 from parse_palette.
                                0x8000 (STP black) at index 0 is also a mask —
                                semi-trans primitives like blood trails need it
-                               transparent so the floor shows through. */
-                            if (byte_val == 0 && c8.a > 0 && pal && pal->data) {
-                                size_t raw_off = (size_t)pal_row_offset * 512;
+                               transparent so the floor shows through.
+                               Not in DC2: its models are drawn opaque, where
+                               0x8000 is black.  E20, E30, E50, E90, EA0 and
+                               SC05 have it at index 0 and use the index for
+                               dark texels, which showed as holes. */
+                            if (!ar.is_dc2 && byte_val == 0 && c8.a > 0 && pal && pal->data) {
+                                size_t raw_off = (size_t)base8 * 2;
                                 if (raw_off + 2 <= pal->size) {
                                     u16 raw = rd_u16(pal->data + raw_off);
                                     if (raw == 0x8000) c8.a = 0;
@@ -807,19 +881,17 @@ int build_texture_atlas(const DatArchive& ar,
                             rgba[di1+2] = c8.b; rgba[di1+3] = c8.a;
                         } else {
                             /* 4bpp: two nibbles per byte */
-                            int actual_sub = is_8bpp_slot ? 0 : rel_sub;
-                            int pal_base_4 = pal_row_offset * 256 + actual_sub * 16;
                             u8 lo = byte_val & 0x0F;
                             u8 hi = (byte_val >> 4) & 0x0F;
-                            RGBA8 c4_lo = palette[pal_base_4 + lo];
-                            RGBA8 c4_hi = palette[pal_base_4 + hi];
+                            RGBA8 c4_lo = palette[base4 + lo];
+                            RGBA8 c4_hi = palette[base4 + hi];
                             /* Apply STP semi-transparency only for decal sub-palettes.
                                Decal = majority of the 16 entries have STP=1.
                                For opaque sub-palettes (shirt, character), STP is just
                                a VRAM artifact and 0x8000 at index 0 = opaque black. */
                             if (pal && pal->data && is_4bpp_decal) {
-                                size_t raw_off_lo = (size_t)pal_row_offset * 512 + (actual_sub * 16 + lo) * 2;
-                                size_t raw_off_hi = (size_t)pal_row_offset * 512 + (actual_sub * 16 + hi) * 2;
+                                size_t raw_off_lo = (size_t)(base4 + lo) * 2;
+                                size_t raw_off_hi = (size_t)(base4 + hi) * 2;
                                 if (raw_off_lo + 2 <= pal->size) {
                                     u16 raw_lo = rd_u16(pal->data + raw_off_lo);
                                     if (raw_lo == 0x8000) c4_lo.a = 0;
