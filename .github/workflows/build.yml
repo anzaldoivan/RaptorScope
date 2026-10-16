@@ -35,7 +35,7 @@ jobs:
         shell: cmd
         run: |
           mkdir stage
-          cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I include tools\dc1_export.cpp src\formats\dat.cpp src\formats\mesh.cpp src\core\lzss.cpp /Fe:stage\dc1_export.exe /Fo:stage\
+          cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I include tools\dc1_export.cpp src\formats\dat.cpp src\formats\mesh.cpp src\formats\dc2_model.cpp src\core\lzss.cpp /Fe:stage\dc1_export.exe /Fo:stage\
 
       - name: Smoke test the exporter
         shell: pwsh
@@ -93,6 +93,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build the exporter and compile the formats layer
         run: |
-          g++ -std=c++11 -O2 -Wall -Iinclude tools/dc1_export.cpp src/formats/dat.cpp src/formats/mesh.cpp src/core/lzss.cpp -o dc1_export
-          g++ -std=c++11 -fsyntax-only -Iinclude -D_snprintf=snprintf src/formats/scd.cpp src/formats/save_editor.cpp src/formats/texture.cpp src/formats/tim.cpp src/core/color.cpp
+          g++ -std=c++11 -O2 -Wall -Iinclude tools/dc1_export.cpp src/formats/dat.cpp src/formats/mesh.cpp src/formats/dc2_model.cpp src/core/lzss.cpp -o dc1_export
+          g++ -std=c++11 -fsyntax-only -Iinclude -D_snprintf=snprintf src/formats/scd.cpp src/formats/save_editor.cpp src/formats/texture.cpp src/formats/tim.cpp src/core/color.cpp tests/export_fixture.cpp
           rc=0; ./dc1_export || rc=$?; test "$rc" -eq 2
+      - name: Dino Crisis 2 unit tests
+        run: |
+          g++ -std=c++11 -O2 -Wall -Iinclude -D_snprintf=snprintf tests/test_dc2.cpp src/formats/dat.cpp src/formats/dc2_room.cpp src/formats/dc2_scd.cpp src/formats/dc2_model.cpp src/core/lzss.cpp -o test_dc2
+          ./test_dc2
+      - name: Dino Crisis 2 corpus tools skip without the game
+        run: |
+          g++ -std=c++11 -O2 -Wall -Iinclude -D_snprintf=snprintf tests/dc2_corpus.cpp src/formats/dat.cpp src/formats/dc2_room.cpp src/formats/dc2_scd.cpp src/formats/dc2_model.cpp src/core/lzss.cpp -o dc2_corpus
+          ./dc2_corpus > corpus.tsv
+          grep -q '^SKIPPED' corpus.tsv
+          python3 tests/check_dc2_corpus.py corpus.tsv | grep -q '^SKIPPED'
