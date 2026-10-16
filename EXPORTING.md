@@ -41,7 +41,7 @@ OBJ positions use the viewer's axes and are in metres, so an OBJ lines up with a
 - Exports triangle-corner vertices and flat geometric normals. This preserves UV seams and rigid assignments; it does not attempt to rebuild a welded, smooth-shaded mesh.
 - Rooms with many palettes have tall atlases, and the PNG is stored uncompressed, so a room GLB can run to tens of megabytes.
 - Invalid/cyclic/out-of-order bone hierarchies, unsupported atlas sizes, or out-of-bounds detected clips cause export failure. The existing archive/model parser is unchanged apart from shared playback refactoring.
-- This targets **DC1 PC**, not the DC1 PlayStation disc format or DC2.
+- This targets **DC1 PC**, not the DC1 PlayStation disc format. Dino Crisis 2 (PC) models export in their bind pose, without animation: OBJ, SMD and GLB from the GUI, GLB from `dc1_export`. Enemy models are textured when the `.TEX` of the same name is beside the package. A Dino Crisis 2 room has no mesh to export.
 
 ## Command-line companion
 

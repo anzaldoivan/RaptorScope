@@ -6,7 +6,7 @@ See [EXPORTING.md](EXPORTING.md) for the new exporter, Windows build instruction
 
 # 🦖 RaptorScope
 
-**A native Win32 + OpenGL viewer and editor for Dino Crisis (1999 PC) game archives**
+**A native Win32 + OpenGL viewer and editor for Dino Crisis (1999 PC) game archives, with partial support for Dino Crisis 2**
 
 [![License: Unlicense](https://img.shields.io/badge/License-Unlicense-blue.svg)](https://unlicense.org/)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20XP%2B-0078D6?logo=windows)](https://www.microsoft.com/windows)
@@ -131,6 +131,31 @@ Zones and rectangles carry only X/Z, so each is drawn on the floor beneath it: t
 - **Software renderer fallback**: GDI Generic compatibility for VMs without GPU acceleration
 - **F11 render mode cycling**: Normal / VM GPU / Software rendering
 
+## Dino Crisis 2
+
+The viewer also opens the PC version of Dino Crisis 2 (GOG build). The game is told apart by the files themselves: its packages use 32-byte header entries. Nothing reads `Dino2.exe`.
+
+Only what the dinorand project has decoded is shown. A room's visible scene is not among it: neither its mesh nor its pre-rendered backgrounds are decoded, so a room appears as its logic layer.
+
+| File | What you get |
+|---|---|
+| Any package (`*.DAT`, `*.TEX`, `*.DBS`) | Entry tree, hex view, Save Selected, Export Decompressed, Import / Replace, Save As |
+| `E*.DAT`, `WEP_*.DAT`, `DOOR*.DAT`, `KOF_*.DAT` and other model packages | The model in its bind pose in the 3D viewer, with OBJ, SMD and GLB export. An enemy's skin is taken from the `.TEX` of the same name in the same folder (`E00.TEX` for `E00.DAT`) |
+| `ST*.DAT` | **Scene**: collision polygons, zones, doors with their destination room, triggers, item pickups, enemy spawns and markers, drawn as an overlay (O). **F4**: the room script. One node per section of the room, each opening as hex |
+| Textures and palettes in any package | The image panel, with the same depth and palette keys as for Dino Crisis |
+| `TITLE.DAT`, `*.PXL` | 320x240 pictures |
+| `MS_*.DAT`, `ME_*.DAT`, `MF_*.DAT` | Each music track listed; Save Selected writes it as an `.mp3`. There is no MP3 playback |
+| `Speech\NNNN.dat` | Plays as audio (the files are WAV) |
+
+Not available for Dino Crisis 2, because the formats are not decoded: the room mesh and prop geometry, cameras and camera-switch zones, backgrounds (`ST*.DBS` holds them after its package), animation, message text, sound effects, saves, and the weapon editor (the weapon data is in the executable). `SC*.DAT`, `MAP*.DAT`, `ITEM.DAT`, `DEMO*.TRG` and room sections 0, 3, 4, 6, 8, 9 and 10 open as hex.
+
+Limits of what is shown:
+
+- A door, trigger, item or spawn whose position the script computes while the game runs is listed in the script (F4) but not drawn. Most raptor spawns are like this.
+- Player models (`WEP_P*.DAT`) open untextured: their skin is not in the package, and where it is stored is not known.
+- Nothing says whether a texture is 4-bit or 8-bit. If a texture looks wrong, switch the depth and palette with the image panel's keys.
+- Room names are in the executable, so the tree shows file names.
+
 ## Building
 
 ### MinGW (Recommended)
@@ -239,6 +264,47 @@ The room initialization script (ptr[5]) uses a multi-threaded virtual machine:
 - **Work target**: 0x22 03 `<slot>` selects a model slot and 0x22 02 `<slot>` a character (the entry that 0x20 or 0x5B filled); 0x2A sets one of its fields (3/4/5 = x/y/z, 6/7/8 = rotation, via `sub_47416C`), 0x36 sets x/y/z and 0x37 the rotation
 - **Control flow**: 0x0C (unconditional jump), 0x0E (conditional relative jump on the last test result), 0x0F (gosub: pushes pc+4 and jumps) and 0x10 (return), 0x05 (jump to another event subroutine), 0x04 (end of thread; every thread finishes with `04 00 00 00`). 0x01 and 0x0A are 4-byte opcodes that scripts continue past; decoding each script straight through with the opcode sizes lands exactly on the next script in every room. Message text follows the last thread in the same block
 - **Exe build**: the DINO.exe addresses in this document and in the source come from a different build than the GOG "Classic REbirth" exe. In that exe, code in 0x422000-0x42BE92 sits 0x160 lower (the 0x42A96D above is 0x42A80D), and the data addresses do not carry over
+
+### Dino Crisis 2
+
+Sources are the dinorand project's documents; `K<n>` is a row of its Dino Crisis 2 registry. Everything below was checked against all files of the GOG build by `tests/dc2_corpus.cpp`.
+
+**Package.** As the DC1 archive, with 32-byte header entries: the 16 bytes of a DC1 entry followed by 16 zero bytes. Unused header slots are `"dummy header    "` plus 16 zeros, and payload padding is zeros. Types: 0 data, 1 texture, 2 palette, 3 sound bank, 4 MP3 stream, 5 LZSS data, 6 LZSS texture, 7 unknown, 8 LZSS texture. Types 1 and 6 are block-tiled like DC1 textures; type 8 is stored row by row. For data entries the first word after the size is the address the entry is loaded at, and every pointer inside the entry is relative to it. `.TEX` files are ordinary packages. `ST*.DBS` is a package followed by more data (the backgrounds, not decoded).
+
+**Room** (`ST*.DAT`, the type 5 entry, loaded at `0x5E0000`). The blob starts with 12 absolute pointers; a null pointer means the room has no such section, and a section runs to the next higher pointer.
+
+| Slot | Contents | Read |
+|---|---|---|
+| 0 | Draw mesh | no |
+| 1 | Markers: `u16 count, u16`, then 20-byte records `{u16 1, u16 1000, u32 id, s16 x, y, z, u16 0x8000, u16, u16}` | yes |
+| 2 | Collision polygons | yes |
+| 3 | Cameras | no |
+| 4 | Table of unknown purpose (36 rooms) | no |
+| 5 | Script | yes |
+| 6 | Camera-switch zones | no |
+| 7 | Zones (79 rooms) | corners only |
+| 8 | Prop geometry (61 rooms) | no |
+| 9, 10 | Unknown | no |
+| 11 | End of the blob | |
+
+Slot 2: `u8 count, u8 count2, u16 0, u32 offset2`, then `count` record offsets relative to the slot. A record is `u8 flags, u8 npoints, u8 index, u8 param`, 4 unknown bytes, `npoints` u32 attribute words, then `npoints + 1` pairs of `s16 x, z` whose last repeats the first: 12 + 8 x npoints bytes. `offset2` leads to `count2` 20-byte records that are not decoded.
+
+Slot 7: a 16-byte header whose first byte is the zone count, then 32-byte records: four `s16 x, z` corners, a `u16` offset to the zone's own data, and 14 more bytes. Only the corners are read.
+
+**Script** (slot 5). A stack machine. Opcodes are one byte: `0x01`-`0x03` are 6 bytes long, `0x05`-`0x08` are 4, `0x10`-`0x59` are 2; `0x04` returns. The routines are found through a table of `u32` offsets at slot + `0x1C`, relative to the table, which ends where the first routine begins. `0x05 <mode> <s16>` pushes a value; mode 1 is a variable, 2 a stack slot, 6 the room's global table, and anything else a literal.
+
+Records are built from the run of pushes in front of an opcode. The last push is block + 0, the one before it block + 4, and so on:
+
+| Opcode | Record | Fields (block offset) |
+|---|---|---|
+| `0x30` | Door | unlock flag `+0x00`, lock `+0x04`, destination `+0x0C` (stage in the high byte, room in the low: `0x0102` is ST102), corners `+0x3C`..`+0x20`, slot `+0x48` |
+| `0x31` | Trigger | routine `+0x00`, thread `+0x04`, corners `+0x24`..`+0x08`, slot `+0x30` |
+| `0x35` | Item pickup | item id `+0x10`, taken flag `+0x14`, corners `+0x34`..`+0x18`, slot `+0x40` |
+| `0x1A` | Enemy spawn | model address `+0x0C`, z `+0x14`, y `+0x18`, x `+0x1C`, type `+0x20`, slot `+0x24` |
+
+Corners are four `x, z` pairs, first pair at the highest offset.
+
+**Model** (DCM, a type 5 entry). Header: vertex, normal, triangle and quad pool pointers, `u16` triangle and quad counts, `u32` part count, `u16 tpage, clut`. Then the parts, 20 bytes each: `s16 x, y, z` offset from the parent, `s8 parent`, `u8 n`, triangle and quad pointers, `u16` triangle and quad counts. Vertices and normals are 8 bytes, triangles 12 (three indices, three UVs) and quads 16. Part *i* owns the next 3 x *n* vertices of the pool and its bone places them. A quad is a strip: (v0, v1, v2) and (v1, v3, v2). All faces share the header's tpage and clut.
 
 ### PSX Transparency Rules
 
