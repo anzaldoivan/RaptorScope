@@ -2682,7 +2682,7 @@ static void ov_draw_camera(const RdtSceneOverlay& ov, int cam_id) {
     ov_color(r, g, b);
     for (int i = 0; i < ov.n_cam_threads; i++) {
         const RdtSceneOverlay::CamThread& ct = ov.cam_threads[i];
-        if (ct.cam_id != cam_id) continue;
+        if (ct.cam_id != cam_id || ct.no_zone) continue;
         glBegin(GL_LINE_LOOP);
         for (int c = 0; c < 4; c++)
             glVertex3f(-(f32)ct.x[c], ov.cam_thread_y[i] + 15.0f, (f32)ct.z[c]);
@@ -2691,7 +2691,7 @@ static void ov_draw_camera(const RdtSceneOverlay& ov, int cam_id) {
     glDisable(GL_LINE_STIPPLE);
     for (int i = 0; i < ov.n_cam_threads && s_ov_hl; i++) {
         const RdtSceneOverlay::CamThread& ct = ov.cam_threads[i];
-        if (ct.cam_id == cam_id)
+        if (ct.cam_id == cam_id && !ct.no_zone)
             ov_pin(-(ct.x[0] + ct.x[1] + ct.x[2] + ct.x[3]) * 0.25f, ov.cam_thread_y[i] + 15.0f,
                    (ct.z[0] + ct.z[1] + ct.z[2] + ct.z[3]) * 0.25f);
     }
@@ -2989,11 +2989,64 @@ void ViewerPanel3D::select_camera(int sel) {
             shot_player[0] += ct.x[k] * 0.25f;
             shot_player[2] += ct.z[k] * 0.25f;
         }
-        shot_player[1] = -cached_overlay.cam_thread_y[si];
         shot_cur = si;
+        if (cached_overlay.dc2) dc2_camera_changed();   /* sets cam_thread_y */
+        shot_player[1] = -cached_overlay.cam_thread_y[si];
         update_shot(true);
+    } else if (cached_overlay.dc2) {
+        dc2_camera_changed();
     }
     render();
+}
+
+/* Dino Crisis 2.  Ground heights are not decoded, so the overlay's flat
+   shapes (collision outline, doors, triggers, items, zones) are drawn on
+   the floor of the selected camera's zone: floor n is at game y = -1000 n
+   (ST100's cameras are on floors 8 and 10).  That is a first guess; PgUp
+   and PgDn move the shapes until they sit on the painted floor.  Camera
+   and sound zones go on their own floors. */
+void ViewerPanel3D::dc2_place_overlay() {
+    RdtSceneOverlay& ov = cached_overlay;
+    f32 y = dc2_floor_adj + (shot_cur >= 0 ? 1000.0f * ov.cam_threads[shot_cur].floor : 0.0f);
+    ov.floor_y = y;
+    for (int i = 0; i < ov.n_zones; i++)
+        ov.zone_y[i] = ov.zones[i].kind == RDT_ZONE_SOUND ?
+                       dc2_floor_adj + 1000.0f * (s8)ov.zones[i].collision_group : y;
+    for (int i = 0; i < ov.n_cam_threads; i++)
+        ov.cam_thread_y[i] = dc2_floor_adj + 1000.0f * ov.cam_threads[i].floor;
+    if (!hRC || !gl_overlay_id) return;
+    wglMakeCurrent(hDC, hRC);
+    build_overlay_list(gl_overlay_id, cached_overlay, ov_vis);
+    wglMakeCurrent(0, 0);
+}
+
+/* The shot in use changed: its background from the room's .DBS (none when
+   the file is missing), and the shapes on its floor. */
+void ViewerPanel3D::dc2_camera_changed() {
+    static u8 rgba[DC2_BG_W * DC2_BG_H * 4];
+    bool ok = shot_cur >= 0 && dc2_camera_background(cached_overlay.cam_threads[shot_cur].dbs_off, rgba);
+    set_background(ok ? rgba : 0);
+    dc2_place_overlay();
+}
+
+/* 320x240 into a 512x256 texture: OpenGL 1.1 wants powers of two */
+void ViewerPanel3D::set_background(const u8* rgba) {
+    has_bg = false;
+    if (!hRC || !rgba) return;
+    wglMakeCurrent(hDC, hRC);
+    if (!gl_bg_id) {
+        glGenTextures(1, &gl_bg_id);
+        glBindTexture(GL_TEXTURE_2D, gl_bg_id);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 512, 256, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        /* nearest: the texels past 320x240 are never written */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+    glBindTexture(GL_TEXTURE_2D, gl_bg_id);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, DC2_BG_W, DC2_BG_H, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    wglMakeCurrent(0, 0);
+    has_bg = true;
 }
 
 void ViewerPanel3D::set_view_hide(u64 hide) {
@@ -3039,6 +3092,23 @@ void ViewerPanel3D::update_shot(bool lock) {
     cam_pitch = asinf(dy / d) * 180.0f / 3.14159265f;
     cam_yaw = atan2f(dx, dz) * 180.0f / 3.14159265f;
     cam_upx = 0; cam_upy = 1; cam_upz = 0;
+    /* DC2 roll (36 of 1169 cameras): turn the up vector about the view
+       axis, as dc2_camera_project turns the picture.  The sign has not
+       been checked against the game. */
+    s16 roll = cached_overlay.cam_threads[shot_cur].roll;
+    if (cached_overlay.dc2 && roll) {
+        f32 f[3] = { -dx / d, -dy / d, -dz / d };            /* eye to target */
+        f32 r[3] = { -f[2], 0, f[0] };                       /* f x up */
+        f32 rl = sqrtf(r[0] * r[0] + r[2] * r[2]);
+        if (rl > 1e-4f) {
+            r[0] /= rl; r[2] /= rl;
+            f32 u[3] = { r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0] };
+            f32 a = roll * (6.2831853f / 4096.0f);
+            cam_upx = cosf(a) * u[0] - sinf(a) * r[0];
+            cam_upy = cosf(a) * u[1] - sinf(a) * r[1];
+            cam_upz = cosf(a) * u[2] - sinf(a) * r[2];
+        }
+    }
 }
 
 /* WASD / arrows: walk the player along the view's heading and keep it on
@@ -3064,6 +3134,7 @@ void ViewerPanel3D::move_shot_player(f32 fwd, f32 right) {
             break;
         }
         shot_cur = z;
+        if (cached_overlay.dc2) dc2_camera_changed();
     }
     update_shot(false);
     render();
@@ -3075,6 +3146,7 @@ int ViewerPanel3D::shot_zone_at(const f32 p[3]) const {
     int found = -1;
     for (int i = 0; i < cached_overlay.n_cam_threads; i++) {
         const RdtSceneOverlay::CamThread& ct = cached_overlay.cam_threads[i];
+        if (ct.no_zone || (ct.zflags & 0x80)) continue;     /* DC2: no zone, or one switched off */
         if (fabsf(cached_overlay.cam_thread_y[i] + p[1]) > 1500) continue;
         bool in = false;
         for (int a = 0, b = 3; a < 4; b = a++)
@@ -3082,6 +3154,7 @@ int ViewerPanel3D::shot_zone_at(const f32 p[3]) const {
                 p[0] < ct.x[b] + (f32)(ct.x[a] - ct.x[b]) * (p[2] - ct.z[b]) / (f32)(ct.z[a] - ct.z[b]))
                 in = !in;
         if (!in) continue;
+        if (cached_overlay.dc2) return i;       /* the game takes the first zone in order */
         if (i == shot_cur) return i;
         f32 e[3], t[3];
         if (found < 0 && rdt_camera_shot(ct.desc, p, e, t) != RDT_SHOT_NONE) found = i;
@@ -3140,8 +3213,12 @@ f32 ViewerPanel3D::floor_below(f32 vx, f32 vz, f32 vy) const {
    on a shot, fitted so the whole 4:3 frame shows, times the scroll zoom. */
 double ViewerPanel3D::view_fovy(double aspect) const {
     if (!shot_locked || cam_sel < 0) return 45.0;
-    double half = 120.0 / 320.0;
-    if (aspect < 4.0 / 3.0) half = (160.0 / 320.0) / aspect;
+    /* A DC2 camera carries its own projection distance */
+    double H = 320.0;
+    if (cached_overlay.dc2 && shot_cur >= 0 && cached_overlay.cam_threads[shot_cur].proj)
+        H = cached_overlay.cam_threads[shot_cur].proj;
+    double half = 120.0 / H;
+    if (aspect < 4.0 / 3.0) half = (160.0 / H) / aspect;
     return 2.0 * atan(half * shot_zoom) * 180.0 / 3.14159265;
 }
 
@@ -3266,6 +3343,7 @@ void ViewerPanel3D::set_mesh(const Mesh& mesh) {
         gl_pick_id = 0; pick_tri = -1; pick_section = 0; pick_info[0] = 0;
     }
     cam_sel = -1; n_cams = 0; view_hide = 0; shot_locked = false; shot_kind = 0; shot_cur = -1; shot_zoom = 1;
+    has_bg = false; dc2_floor_adj = 0;
     build_mesh_lists(mesh);
 
     /* Cache mesh for immediate-mode drawing (VM fallback) */
@@ -3450,8 +3528,8 @@ void ViewerPanel3D::fill_ov_tree() {
     /* A Dino Crisis 2 room fills the same lists from its own sections and
        opcodes (dc2_room_overlay) */
     static const char* names_dc2[OverlayVis::N_TYPES] = {
-        "Cameras", "Script cameras", "Camera cut zones", "Doors, triggers, items (0x30/0x31/0x35)",
-        "Zones (slot 7)", "Collision polygons (slot 2)", "Enemy spawns (0x1A)", "Characters",
+        "Cameras (slots 9, 3)", "Script cameras", "Camera cut zones", "Doors, triggers, items (0x30/0x31/0x35)",
+        "Zones (slot 7), sound zones (slot 6)", "Collision polygons (slot 2)", "Enemy spawns (0x1A)", "Characters",
         "Markers (slot 1)", "Object spawns", "Lights", "Fog",
     };
     const RdtSceneOverlay& ov = cached_overlay;
@@ -3473,7 +3551,7 @@ void ViewerPanel3D::fill_ov_tree() {
                 for (int i = 0; i < ov.n_cam_threads; i++) {
                     const RdtSceneOverlay::CamThread& ct = ov.cam_threads[i];
                     if (ct.cam_id != id) continue;
-                    zones++;
+                    if (!ct.no_zone) zones++;
                     f32 p[3] = { 0, -ov.cam_thread_y[i], 0 }, e[3], g[3];
                     for (int k = 0; k < 4; k++) { p[0] += ct.x[k] * 0.25f; p[2] += ct.z[k] * 0.25f; }
                     int kind = rdt_camera_shot(ct.desc, p, e, g);
@@ -3483,6 +3561,8 @@ void ViewerPanel3D::fill_ov_tree() {
                 _snprintf(buf, sizeof(buf) - 1, "Camera %d  (%s%d zone%s)", id,
                           fixed && tracking ? "fixed/tracking, " : fixed ? "fixed, " :
                           tracking ? "tracking, " : "", zones, zones == 1 ? "" : "s");
+                if (ov.dc2 && zones == 0)   /* 485 of 1169: most are set by script op 0x4A */
+                    _snprintf(buf, sizeof(buf) - 1, "Camera %d  (no zone: set by the script, or unused)", id);
                 OV_ITEM(id);
             }
         } break;
@@ -3504,7 +3584,10 @@ void ViewerPanel3D::fill_ov_tree() {
             for (int i = 0; i < ov.n_zones; i++) {
                 const RdtFloorZone& z = ov.zones[i];
                 if ((z.kind == RDT_ZONE_TRIGGER) != (t == OverlayVis::TRIGGERS)) continue;
-                if (ov.dc2 && t == OverlayVis::FLOOR_ZONES)
+                if (ov.dc2 && z.kind == RDT_ZONE_SOUND)
+                    _snprintf(buf, sizeof(buf) - 1, "#%d  Sound zone %d, floor %d%s", n + 1, z.target_index,
+                              (s8)z.collision_group, z.flags ? "" : ", off");
+                else if (ov.dc2 && t == OverlayVis::FLOOR_ZONES)
                     _snprintf(buf, sizeof(buf) - 1, "#%d  (%d, %d)", n + 1, z.x[0], z.z[0]);
                 else if (ov.dc2 && z.arg < 0)
                     _snprintf(buf, sizeof(buf) - 1, "#%d  %s, set by the script", n + 1,
@@ -3643,6 +3726,14 @@ void ViewerPanel3D::ov_tree_selected(LPARAM lp) {
     if (type == ov_vis.sel_type && idx == ov_vis.sel_item) return;
     ov_vis.sel_type = type;
     ov_vis.sel_item = idx;
+    /* DC2: a camera picked in the tree is shown as the game shows it */
+    if (cached_overlay.dc2 && type == OverlayVis::CAMERAS)
+        for (int k = 0; k < n_cams; k++)
+            if (cam_list[k].cam_id == idx) {
+                select_camera(k);
+                SetFocus(hwnd);     /* so K and PgUp/PgDn go to the view */
+                break;
+            }
     rebuild_overlay();
 }
 
@@ -3657,6 +3748,7 @@ void ViewerPanel3D::rebuild_overlay() {
 void ViewerPanel3D::set_emd(const EmdModel& emd) {
     if (!hRC) return;
     cam_sel = -1; n_cams = 0; view_hide = 0; shot_locked = false; shot_kind = 0; shot_cur = -1; shot_zoom = 1;
+    has_bg = false; dc2_floor_adj = 0;
 
     /* Exit walk mode on model switch */
     if (walk_mode) {
@@ -4179,6 +4271,29 @@ void ViewerPanel3D::render() {
             glVertex2f(1, 1); glVertex2f(0, 1);
         }
         glEnd();
+        /* On a DC2 shot: the camera's background, filling the game's 4:3
+           frame (the same rectangle draw_shot_overlay outlines), so the
+           overlay drawn through that camera lies on the picture */
+        if (has_bg && gl_bg_id && shot_locked && cam_sel >= 0 && cached_overlay.dc2 && !walk_mode) {
+            f32 fw = (f32)w, fh = (f32)vh;
+            if (fw * 3 > fh * 4) fw = fh * 4 / 3; else fh = fw * 3 / 4;
+            fw /= shot_zoom; fh /= shot_zoom;
+            f32 x0 = (w - fw) / 2, y0 = (vh - fh) / 2, x1 = x0 + fw, y1 = y0 + fh;
+            const f32 u1 = DC2_BG_W / 512.0f, v1 = DC2_BG_H / 256.0f;
+            glLoadIdentity();
+            glMatrixMode(GL_PROJECTION); glLoadIdentity();
+            glOrtho(0, w, 0, vh, -1, 1);
+            glEnable(GL_TEXTURE_2D);
+            glBindTexture(GL_TEXTURE_2D, gl_bg_id);
+            glColor3f(1, 1, 1);
+            glBegin(GL_QUADS);
+            glTexCoord2f(0, v1);  glVertex2f(x0, y0);
+            glTexCoord2f(u1, v1); glVertex2f(x1, y0);
+            glTexCoord2f(u1, 0);  glVertex2f(x1, y1);
+            glTexCoord2f(0, 0);   glVertex2f(x0, y1);
+            glEnd();
+            glDisable(GL_TEXTURE_2D);
+        }
         glMatrixMode(GL_MODELVIEW); glPopMatrix();
         glEnable(GL_DEPTH_TEST);
     }
@@ -4737,6 +4852,11 @@ void ViewerPanel3D::render() {
             il = (int)strlen(info);
             _snprintf(info + il, 255 - il, " [View x%.2f]", shot_zoom);
         }
+        if (cached_overlay.dc2) {
+            il = (int)strlen(info);
+            _snprintf(info + il, 255 - il, " [Overlay at game y %d]%s", (int)-cached_overlay.floor_y,
+                      shot_cur >= 0 && !has_bg ? " [No background]" : "");
+        }
     }
 
     /* Render mode indicator */
@@ -4787,7 +4907,9 @@ void ViewerPanel3D::render() {
     /* Controls line  -  bottom left, dimmed */
     const char* ctrl = walk_mode ?
         "WASD:move  Shift:run  Space:jump  P:noclip  LMB:fireball  Mouse:look  ESC/F:exit walk" :
-        (cam_sel >= 0 && shot_cur >= 0 ?
+        (cam_sel >= 0 && shot_cur >= 0 && cached_overlay.dc2 ?
+        "K/Shift+K:camera  PgUp/PgDn:overlay height (Shift: a floor)  Scroll:widen view  J:back to shot  WASD/Arrows:move player  LMB:orbit  RMB:pan  O:overlay  R:reset" :
+        cam_sel >= 0 && shot_cur >= 0 ?
         "K/Shift+K:camera  WASD/Arrows:move player  Shift:run  Scroll:widen view  J:back to shot  LMB:orbit  RMB:pan  R:reset  O:overlay  H:unplaced  T:tex  L:light" :
         anim_model ?
         "LMB:orbit  RMB:pan  Scroll:zoom  Alt+LMB:snap  W:wire  L:light  T:tex  V:vcol  C:cull  B:bones  U:uv  N:normals  Space:play" :
@@ -5706,6 +5828,16 @@ void ViewerPanel3D::on_key(int vk) {
             if (v >= n_cams) v = -1;
             if (v < -1) v = n_cams - 1;
             select_camera(v);
+        }
+        break;
+    case VK_PRIOR: case VK_NEXT:
+        /* DC2: raise or lower the overlay's flat shapes, 100 units a
+           press and a floor (1000) with Shift */
+        if (cached_overlay.dc2 && !is_emd) {
+            f32 step = (GetKeyState(VK_SHIFT) & 0x8000) ? 1000.0f : 100.0f;
+            dc2_floor_adj += vk == VK_PRIOR ? step : -step;
+            dc2_place_overlay();
+            render();
         }
         break;
     case 'U': show_uv_editor(); break;

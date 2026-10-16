@@ -69,6 +69,8 @@ static EmdModel* g_emd_model = 0;
    in for a skin the package lacks (dc2_alt_skin_name). */
 static DatArchive* g_dc2_skin = 0;
 static bool        g_dc2_skin_alt = false;
+/* The ST*.DBS next to an open DC2 room: one background per camera */
+static DatArchive* g_dc2_dbs = 0;
 
 /* EMD header offsets discovered during tree building (for multi-EMD entries) */
 #define MAX_EMDS_PER_ENTRY 16
@@ -989,6 +991,7 @@ void App::close_archive() {
     g_image.clear_face_usage();
     delete archive; archive = 0;
     delete g_dc2_skin; g_dc2_skin = 0;
+    delete g_dc2_dbs; g_dc2_dbs = 0;
     free(raw_hex_buf); raw_hex_buf = 0; raw_hex_size = 0;
     if (hTree) TreeView_DeleteAllItems(hTree);
     /* Destroy any text overlay controls */
@@ -1122,7 +1125,7 @@ static void dc2_tree_add(HWND hTree, HTREEITEM parent, int i, const DatEntry& e)
     } else if (dc2_room_directory(dec.data, dec.size, e.load_base, dir)) {
         _snprintf(label, 159, "#%d  Room  %u -> %u bytes", i, e.size, (unsigned)dec.size);
         HTREEITEM hRoom = tree_add(hTree, parent, label, -1);
-        tree_add(hTree, hRoom, "Scene (collision, zones, doors, items, spawns)", i);
+        tree_add(hTree, hRoom, "Scene (cameras, collision, zones, doors, items, spawns)", i);
         for (int k = 0; k < DC2_ROOM_SLOTS - 1; k++) {
             if (!dir.present[k]) continue;
             _snprintf(label, 159, "Slot %d  %s  %u bytes", k, dc2_room_slot_name(k), dir.size[k]);
@@ -2008,6 +2011,19 @@ static bool dc2_decode_jpeg(const u8* data, size_t size, u8* rgba, int w, int h)
     return ok;
 }
 
+/* The background of the camera whose package starts at dbs_off in the
+   room's .DBS, as 320x240 RGBA.  False when the .DBS is not there, the
+   offset is not a background or the JPEG does not decode. */
+bool dc2_camera_background(u32 dbs_off, u8* rgba)
+{
+    Dc2Background bg;
+    if (!g_dc2_dbs) return false;
+    int pkg = dc2_background_at(*g_dc2_dbs, dbs_off);
+    if (pkg < 0 || !dc2_background(*g_dc2_dbs, pkg, bg) || bg.w != DC2_BG_W || bg.h != DC2_BG_H) return false;
+    const DatEntry& jpeg = g_dc2_dbs->entries[bg.first + 1];
+    return dc2_decode_jpeg(jpeg.data, jpeg.size, rgba, DC2_BG_W, DC2_BG_H);
+}
+
 /* An entry of an ST*.DBS.  The JPEG is shown as a picture; reached through
    its "Background" node (sub = 1) it takes the mask tiles too, as M
    sets: not at all, tinted over the picture, or alone.  The mask tiles'
@@ -2171,10 +2187,28 @@ static bool dc2_entry_select(int idx, int sub, const DatEntry& e)
             return true;
         }
 
+        /* The backgrounds are in the .DBS of the same name, as a model's
+           skin is in its .TEX.  Without it the cameras have no picture. */
+        delete g_dc2_dbs; g_dc2_dbs = 0;
+        {
+            char path[MAX_PATH];
+            _snprintf(path, MAX_PATH - 1, "%s", g_app.archive->filename.c_str());
+            path[MAX_PATH - 1] = 0;
+            char* dot = strrchr(path, '.');
+            if (dot && strlen(dot) == 4) {
+                memcpy(dot, ".DBS", 4);
+                g_dc2_dbs = new DatArchive();
+                if (!dat_parse_file(path, *g_dc2_dbs)) { delete g_dc2_dbs; g_dc2_dbs = 0; }
+            }
+        }
+
         /* The draw mesh is not decoded: the scene is the overlay, framed
            by the collision outline. */
         RdtSceneOverlay overlay;
         dc2_room_overlay(dd, ds, e.load_base, overlay);
+        int n_room_cams = 0;
+        for (int i = 0; i < overlay.n_cam_threads; i++)
+            if (overlay.cam_threads[i].cam_id >= n_room_cams) n_room_cams = overlay.cam_threads[i].cam_id + 1;
         Mesh mesh;
         dc2_room_outline_mesh(overlay, mesh);
         g_viewer3d.clear_texture();
@@ -2186,8 +2220,9 @@ static bool dc2_entry_select(int idx, int sub, const DatEntry& e)
         g_viewer3d.set_overlay(overlay);
         g_scd.load_dc2(dd, ds, e.load_base);
 
-        _snprintf(buf, 255, "Entry %d: DC2 Room  -  %d collision polygons, %d zones/doors/triggers/items, %d spawns, %d markers  (room mesh and cameras are not decoded)  [O=overlay, F4=SCD]",
-                  idx, overlay.n_polys, overlay.n_zones, overlay.n_items, overlay.n_enemies);
+        _snprintf(buf, 255, "Entry %d: DC2 Room  -  %d cameras (%s), %d collision polygons, %d zones/doors/triggers/items, %d spawns, %d markers  (room mesh is not decoded)  [K=camera, O=overlay, F4=SCD]",
+                  idx, n_room_cams, g_dc2_dbs ? "backgrounds from the .DBS" : "no .DBS beside the room: no backgrounds",
+                  overlay.n_polys, overlay.n_zones, overlay.n_items, overlay.n_enemies);
         g_app.set_status(buf);
         g_app.switch_panel(PANEL_3D);
         return true;

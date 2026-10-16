@@ -39,6 +39,11 @@ struct HexPanel {
     void stop_idle();
 };
 
+/* Dino Crisis 2: decode the background of the camera whose package starts
+   at dbs_off in the open room's ST*.DBS into 320x240 RGBA (app.cpp).  False
+   when there is none. */
+bool dc2_camera_background(u32 dbs_off, u8* rgba);
+
 struct ImagePanel {
     HWND    hwnd;
     HBITMAP hBmp;
@@ -258,6 +263,14 @@ struct ViewerPanel3D {
     f32     shot_zoom;      /* scroll on a shot: field of view as a multiple of the game's */
     bool    shot_moving;    /* WASD / arrow timer running */
     DWORD   shot_tick_ms;
+    /* Dino Crisis 2: the selected camera's background, drawn behind the
+       scene while the view is on the shot, and the height the flat overlay
+       shapes are drawn at.  Ground heights are not decoded: the shapes go
+       on the camera zone's floor (1000 units a floor), and PgUp/PgDn move
+       them by dc2_floor_adj. */
+    unsigned int gl_bg_id;
+    bool    has_bg;
+    f32     dc2_floor_adj;  /* viewer units, up is positive */
     bool    show_normals;   /* debug: draw vertex normal lines */
     bool    show_cull;      /* backface culling toggle (C key) */
     bool    show_grid;      /* ground grid toggle (G key) */
@@ -401,7 +414,7 @@ struct ViewerPanel3D {
                       tri_count(0), vert_count(0), bone_count(0),
                       show_wireframe(false), show_lighting(true),
                       show_bones(false), show_bone_labels(false), show_textured(true),
-                      show_vcolors(false), show_overlay(false), ov_tree(0), ov_tree_w(0), ov_tree_dark(-1), show_alt_geo(false), n_cams(0), cam_sel(-1), view_hide(0), shot_locked(false), shot_kind(0), shot_cur(-1), shot_player(), shot_eye(), shot_tgt(), shot_zoom(1), shot_moving(false), shot_tick_ms(0), show_normals(false),
+                      show_vcolors(false), show_overlay(false), ov_tree(0), ov_tree_w(0), ov_tree_dark(-1), show_alt_geo(false), n_cams(0), cam_sel(-1), view_hide(0), shot_locked(false), shot_kind(0), shot_cur(-1), shot_player(), shot_eye(), shot_tgt(), shot_zoom(1), shot_moving(false), shot_tick_ms(0), gl_bg_id(0), has_bg(false), dc2_floor_adj(0), show_normals(false),
                       show_cull(true),
                       show_grid(true), show_hud(true),
                       walk_mode(false), walk_noclip(false), walk_x(0), walk_y(-1500), walk_z(0),
@@ -449,6 +462,9 @@ struct ViewerPanel3D {
     f32  floor_below(f32 vx, f32 vz, f32 vy) const;  /* viewer coords */
     double view_fovy(double aspect) const;
     void draw_shot_overlay(int w, int vh);
+    void dc2_camera_changed();     /* DC2: load the shot's background, place the flat shapes */
+    void dc2_place_overlay();      /* DC2: overlay heights from the shot's floor and dc2_floor_adj */
+    void set_background(const u8* rgba);  /* 320x240 RGBA, 0 = none */
     void build_mesh_lists(const Mesh& mesh);  /* solid/blend/wire lists, GL context current */
     /* Overlay element tree */
     void fill_ov_tree();           /* list the room's overlay elements */
