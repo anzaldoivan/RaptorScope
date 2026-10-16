@@ -91,6 +91,41 @@ bool render_texture_by_faces(const u8* pixels, size_t pix_size,
                              const DatArchive& archive,
                              u8** out_rgba, int* out_w, int* out_h);
 
+/*─── 3D viewer atlas ────────────────────────────────────────────*/
+
+/* Where the atlas keeps what: every texture of an archive at its VRAM
+   position, four pixels per halfword, once per 512-row slice.  A slice
+   holds one decoding of the whole of VRAM: slice_map[row * 65 + slot] is
+   the slice for CLUT row clut_base_y + row, slot 0 decoded as 8bpp and
+   slot n + 1 as 4bpp with the sub-palette at clut_base_x + 16 * n.
+   -1 = no such slice. */
+struct TexAtlasLayout {
+    int w, h;                  /* atlas size in pixels */
+    int bpp;                   /* 4: four pixels per VRAM halfword */
+    int vram_x, vram_y;        /* VRAM position of the atlas's first texel */
+    int clut_base_x, clut_base_y;
+    int num_pal_rows;          /* CLUT rows the palettes span (at most 16) */
+    int num_slices;            /* slices stacked in the atlas */
+    int slice_map[16 * 65];
+};
+
+/* Compose the atlas for the faces that use the given CLUTs (clut fields
+   as stored in a face; used_is4bpp[i] is set when a 4bpp face uses
+   used_cluts[i]).  max_h caps the atlas height; slices beyond it are
+   dropped from the map.  *out_rgba is malloc'd (caller frees).
+   Returns 1 when built, 0 when the archive has no texture, -1 when there
+   is nothing to build (an item bank, or no memory). */
+int build_texture_atlas(const DatArchive& archive,
+                        const u16* used_cluts, const bool* used_is4bpp, int n_used,
+                        int max_h, TexAtlasLayout& layout, u8** out_rgba);
+
+/* The slice a face with this tpage and clut samples. */
+int atlas_face_slice(const TexAtlasLayout& a, u16 tpage, u16 clut);
+
+/* Atlas coordinates (0..1) of a face's three corners, at texel centres. */
+void atlas_face_uv(const TexAtlasLayout& a, u16 tpage, u16 clut,
+                   const u8 uv[3][2], float out[3][2]);
+
 /*─── Background extraction (LZSS0 compressed) ──────────────────*/
 
 struct BgTile {

@@ -2118,29 +2118,16 @@ void ViewerPanel3D::resize(int w, int h) {
     wglMakeCurrent(0, 0);
 }
 
-/* Atlas slice holding a face's CLUT: 2D sparse slice lookup,
-   slot 0 = 8bpp, slot rel+1 = 4bpp sub-palette. */
-static int face_atlas_slice(const MeshTri& t, int clut_base_y, int clut_base_x,
-                            int total_v_slices)
+/* The viewer's atlas as the formats layer describes it */
+static void atlas_layout(TexAtlasLayout& a, int tex_w, int tex_h, u16 tex_vram_x, int tex_bpp,
+                         int clut_base_y, u16 tex_vram_y, int num_sub_pals, int clut_base_x)
 {
-    if (total_v_slices <= 1) return 0;
-    int clut_y = (t.clut >> 6) & 0x1FF;
-    int row = clut_y - clut_base_y;
-    if (row < 0) row = 0;
-    if (row >= 16) row = 15;
-
-    int slice_idx;
-    if (((t.tpage >> 7) & 3) == 0) { /* 4bpp face → slot rel+1 */
-        int clut_x = (t.clut & 0x3F) * 16;
-        int rel = (clut_x - clut_base_x) / 16;
-        if (rel < 0) rel = 0; if (rel >= 64) rel = 63;
-        slice_idx = g_viewer3d.slice_map[row * 65 + rel + 1];
-        if (slice_idx < 0) slice_idx = g_viewer3d.slice_map[row * 65 + 0]; /* fallback: 8bpp */
-    } else { /* 8bpp face → slot 0 */
-        slice_idx = g_viewer3d.slice_map[row * 65 + 0];
-    }
-    if (slice_idx < 0) slice_idx = 0; /* ultimate fallback */
-    return slice_idx;
+    a.w = tex_w; a.h = tex_h; a.bpp = tex_bpp;
+    a.vram_x = tex_vram_x; a.vram_y = tex_vram_y;
+    a.clut_base_x = clut_base_x; a.clut_base_y = clut_base_y;
+    a.num_pal_rows = g_viewer3d.num_pal_rows;
+    a.num_slices = num_sub_pals;
+    memcpy(a.slice_map, g_viewer3d.slice_map, sizeof(a.slice_map));
 }
 
 /* Marks the faces whose texture has see-through texels (alpha 0, which the
@@ -2158,6 +2145,9 @@ static void mark_see_through(const Mesh& mesh, u8* out, const u8* atlas,
     int tex_ppw = (tex_bpp == 4) ? 4 : (tex_bpp == 16) ? 1 : 2;
     int total_v_slices = num_sub_pals;
     int single_h = (total_v_slices > 1) ? atlas_h / total_v_slices : atlas_h;
+    TexAtlasLayout lay;
+    atlas_layout(lay, atlas_w, atlas_h, tex_vram_x, tex_bpp, clut_base_y, tex_vram_y,
+                 num_sub_pals, clut_base_x);
 
     for (int i = 0; i < mesh.tri_count; i++) {
         const MeshTri& t = mesh.tris[i];
@@ -2166,7 +2156,7 @@ static void mark_see_through(const Mesh& mesh, u8* out, const u8* atlas,
         int tp = (t.tpage >> 7) & 3;
         int face_ppw = (tp == 0) ? 4 : (tp == 2) ? 1 : 2;
         int x0 = ((t.tpage & 0xF) * 64 - (int)tex_vram_x) * tex_ppw;
-        int y0 = face_atlas_slice(t, clut_base_y, clut_base_x, total_v_slices) * single_h
+        int y0 = atlas_face_slice(lay, t.tpage, t.clut) * single_h
                + ((t.tpage >> 4) & 1) * 256 - (int)tex_vram_y;
 
         /* Texel centres inside the triangle in UV space */
@@ -2208,12 +2198,9 @@ static void build_solid_list(int list_id, const Mesh& mesh,
                              int abr_filter = -1 /* -1=all, 0..3=only that ABR */,
                              const u8* see_through = 0,
                              int side_filter = -1 /* -1=all, 0=solid only, 1=see-through only */) {
-    /* tex_ppw: pixels per VRAM halfword at the TEXTURE's rendered BPP */
-    int tex_ppw = (tex_bpp == 4) ? 4 : (tex_bpp == 16) ? 1 : 2;
-    /* With 2D sparse atlas: num_sub_pals = total compact slices.
-       Each slice is padded_h=512 tall. single_h = one slice height. */
-    int total_v_slices = num_sub_pals;
-    int single_h = (total_v_slices > 1) ? tex_h / total_v_slices : tex_h;
+    TexAtlasLayout lay;
+    atlas_layout(lay, tex_w, tex_h, tex_vram_x, tex_bpp, clut_base_y, tex_vram_y,
+                 num_sub_pals, clut_base_x);
 
     glNewList(list_id, GL_COMPILE);
     glBegin(GL_TRIANGLES);
@@ -2283,39 +2270,11 @@ static void build_solid_list(int list_id, const Mesh& mesh,
            grey texel shaded 30..121 corner to corner, flat white without. */
         bool gouraud = t.gouraud && !t.alt;
 
-        /* PS1 tpage UV mapping */
-        int tx = t.tpage & 0xF;
-        int ty = (t.tpage >> 4) & 1;
-        int tp = (t.tpage >> 7) & 3;
-        int face_ppw = (tp == 0) ? 4 : (tp == 2) ? 1 : 2;
-
-        float tw = (tex_w > 0) ? (float)tex_w : 256.0f;
-        float th = (tex_h > 0) ? (float)tex_h : 256.0f;
-        float u_off = (float)((tx * 64 - (int)tex_vram_x) * tex_ppw) / tw;
-        float v_off = (float)(ty * 256 - (int)tex_vram_y) / (float)single_h;  /* within one slice */
-        float u_scl = (float)tex_ppw / ((float)face_ppw * tw);
-
-        /* CLUT atlas V offset: 2D sparse slice lookup.
-           slot 0 = 8bpp, slot rel+1 = 4bpp sub-palette. */
-        float clut_v_off = 0.0f;
-        if (total_v_slices > 1) {
-            int slice_idx = face_atlas_slice(t, clut_base_y, clut_base_x, total_v_slices);
-            clut_v_off = (float)(slice_idx * single_h) / th;
-            v_off = v_off * ((float)single_h / th);
-        }
-
-        /* Sample texel centres.  The PSX reads texel (u, v) at UV (u, v);
-           bilinear filtering does so only at the texel's centre, and at its
-           corner takes a quarter from each of the texels around it.  Shifted
-           by half a texel, a face blends only texels inside its own UV
-           range.  Unshifted, a face mapped to one texel at the corner of a
-           solid patch took in the masked texels beside it and came out see-
-           through: ST108's wall box samples (240, 176) of a grey patch with
-           0x0000 left of and above it. */
+        /* Atlas coordinates of the corners' texel centres */
+        float tc[3][2];
+        atlas_face_uv(lay, t.tpage, t.clut, t.uv, tc);
         for (int vi = 0; vi < 3; vi++) {
-            float u = u_off + ((float)t.uv[vi][0] + 0.5f) * u_scl;
-            float v = clut_v_off + v_off + ((float)t.uv[vi][1] + 0.5f) / th;
-            glTexCoord2f(u, v);
+            glTexCoord2f(tc[vi][0], tc[vi][1]);
             if (gouraud) {
                 const u8* c = t.vcol[vi];
                 glColor3ub((u8)(c[0] < 128 ? c[0] * 2 : 255),

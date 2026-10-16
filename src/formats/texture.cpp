@@ -2,6 +2,7 @@
  *  RaptorScope  -  Texture Rendering & Swizzle
  *═══════════════════════════════════════════════════════════════════*/
 #include "formats/texture.h"
+#include "core/lzss.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -467,6 +468,449 @@ bool render_texture_by_faces(const u8* pixels, size_t pix_size,
     free(src); free(linear); free(refs); free(pal_rgba);
     *out_rgba = rgba; *out_w = w; *out_h = h;
     return true;
+}
+
+/*═══════════════════════════════════════════════════════════════════
+ *  3D viewer atlas
+ *
+ *  The PS1 has one 1024x512 VRAM of 16-bit words.  A face's tpage
+ *  selects a page of it and its clut a row of colours; a texture entry
+ *  gives the VRAM position its pixels are loaded at, a palette entry the
+ *  position of its colours.  The atlas is that VRAM decoded to RGBA,
+ *  once per CLUT in use: every texture drawn where it loads, four
+ *  pixels per halfword (8bpp texels doubled), in a 512-row slice.
+ *═══════════════════════════════════════════════════════════════════*/
+int build_texture_atlas(const DatArchive& ar,
+                        const u16* used_cluts, const bool* used_is4bpp, int n_used,
+                        int max_h, TexAtlasLayout& lay, u8** out_rgba)
+{
+    *out_rgba = 0;
+    memset(&lay, 0, sizeof(lay));
+    memset(lay.slice_map, -1, sizeof(lay.slice_map));
+
+    /* Collect texture and palette entries */
+    struct TexInfo { int idx; int vram_x, vram_w, vram_h; };
+    struct PalInfo { int idx; int vram_x, vram_y, vram_w, vram_h; };
+    TexInfo texes[16]; int n_tex = 0;
+    PalInfo pals[16];  int n_pal = 0;
+
+    for (int i = 0; i < ar.count && n_tex < 16 && n_pal < 16; i++) {
+        const DatEntry& e = ar.entries[i];
+        if (e.type == DAT_TEXTURE || e.type == DAT_LZSS1 || e.type == DAT_TEXTURE_LINEAR) {
+            /* Skip entries with invalid VRAM coords or tiny dims —
+               type 3+4 pairs can be EMD skeleton+body data, not textures.
+               PS1 VRAM is 1024x512 halfwords; anything outside is bogus. */
+            if (e.x > 1024 || (e.w < 2 && e.h < 2))
+                continue;
+            TexInfo ti;
+            ti.idx = i;
+            ti.vram_x = e.x;
+            ti.vram_w = e.w;
+            ti.vram_h = e.h;
+            texes[n_tex++] = ti;
+        }
+        if (e.type == DAT_PALETTE) {
+            PalInfo pi;
+            pi.idx = i;
+            pi.vram_x = e.x;
+            pi.vram_y = e.y;
+            pi.vram_w = e.w;
+            pi.vram_h = e.h;
+            pals[n_pal++] = pi;
+        }
+    }
+    if (n_tex == 0) return 0;
+
+    /* Item sprite banks (item.dat/item2.dat) have embedded CLUTs per block
+       rather than separate DAT_PALETTE entries, which this cannot find.
+       Their textures are shown one at a time by the image panel. */
+    if (ar.is_item_bank)
+        return -1;
+
+    /* ─── Composite into shared VRAM image ─── */
+    /* Determine the VRAM halfword X range. */
+    int min_vx = 0x7FFF, max_vx_end = 0;
+    for (int i = 0; i < n_tex; i++) {
+        if (texes[i].vram_x < min_vx) min_vx = texes[i].vram_x;
+        int end = texes[i].vram_x + texes[i].vram_w;
+        if (end > max_vx_end) max_vx_end = end;
+    }
+    int total_vram_hw = max_vx_end - min_vx;
+    if (total_vram_hw <= 0) return -1;
+
+    /* Pixel width: always use 4bpp pixel width (widest) so that both 8bpp and
+       4bpp faces can coexist.  8bpp columns are pixel-doubled horizontally;
+       atlas_face_uv maps 8bpp face UVs across the doubled pixels
+       (ast10c.dat: 8bpp faces on tx=5, 4bpp on tx=7). */
+    int bpp = 4;
+    int ppw = 4;
+    int total_pw = total_vram_hw * ppw;
+
+    /* Height: 512 (full VRAM height) per slice */
+    int padded_h = 512;
+
+    /* ─── Build CLUT atlas using absolute VRAM Y positions ─── */
+    /* The mesh face CLUT values reference the palette's VRAM upload position
+       (e.g. y=505), not post-relocation positions (y=0,1,2). */
+    int clut_y_min = 0x1FF, clut_y_max = 0;
+    for (int pi = 0; pi < n_pal; pi++) {
+        int py = pals[pi].vram_y;
+        int ph = pals[pi].vram_h;
+        if (ph < 1) ph = 1;
+        if (py < clut_y_min) clut_y_min = py;
+        if (py + ph - 1 > clut_y_max) clut_y_max = py + ph - 1;
+    }
+    int total_clut_rows = clut_y_max - clut_y_min + 1;
+    if (total_clut_rows < 1) total_clut_rows = 1;
+    if (total_clut_rows > 16) total_clut_rows = 16;
+
+    /* Match palette to each texture (forward adjacency) */
+    struct TexPalPair {
+        int tex_i;               /* index into texes[] */
+        const DatEntry* pal;     /* matched palette entry */
+        int pal_vram_y;          /* VRAM Y of matched palette */
+        int pal_rows;            /* number of palette rows (height) */
+    };
+    TexPalPair pairs[16];
+
+    for (int ti = 0; ti < n_tex; ti++) {
+        pairs[ti].tex_i = ti;
+        pairs[ti].pal = 0;
+        pairs[ti].pal_vram_y = clut_y_min;
+        pairs[ti].pal_rows = 1;
+
+        /* Match palette: use the next palette entry after this texture */
+        int tex_idx = texes[ti].idx;
+        for (int pi = 0; pi < n_pal; pi++) {
+            int pal_idx = pals[pi].idx;
+            if (pal_idx > tex_idx) {
+                bool intervening = false;
+                for (int tj = 0; tj < n_tex; tj++) {
+                    if (tj != ti && texes[tj].idx > tex_idx && texes[tj].idx < pal_idx)
+                        intervening = true;
+                }
+                if (!intervening) {
+                    pairs[ti].pal = &ar.entries[pal_idx];
+                    pairs[ti].pal_vram_y = pals[pi].vram_y;
+                    pairs[ti].pal_rows = pals[pi].vram_h;
+                    if (pairs[ti].pal_rows < 1) pairs[ti].pal_rows = 1;
+                    break;
+                }
+            }
+        }
+        if (!pairs[ti].pal && n_pal > 0) {
+            pairs[ti].pal = &ar.entries[pals[0].idx];
+            pairs[ti].pal_vram_y = pals[0].vram_y;
+            pairs[ti].pal_rows = pals[0].vram_h;
+            if (pairs[ti].pal_rows < 1) pairs[ti].pal_rows = 1;
+        }
+    }
+
+    /* ─── 2D sparse sub-palette atlas: (row, slot) pairs from used_cluts ─── */
+    /* slice_map layout: row * 65 + slot.
+       slot 0 = 8bpp (pixel-doubled) for this row.
+       slot 1..64 = 4bpp sub-palette rel_sub = slot - 1.
+       This prevents 4bpp sub=0 (CLUT X == base_x) from colliding with 8bpp. */
+    int num_sub_pals = 1;
+    int clut_base_x = 0;
+    if (n_pal > 0) {
+        clut_base_x = pals[0].vram_x;
+        int base_sub = clut_base_x / 16;
+
+        int compact = 0;
+        /* Always allocate 8bpp slice for row 0 */
+        lay.slice_map[0 * 65 + 0] = compact++;
+        for (int ci = 0; ci < n_used; ci++) {
+            u16 cl = used_cluts[ci];
+            int cy = (cl >> 6) & 0x1FF;
+            int cx = (cl & 0x3F) * 16;
+            int row = cy - clut_y_min;
+            if (row < 0) row = 0;
+            if (row >= 16) row = 15;
+            int rel = cx / 16 - base_sub;
+            if (rel < 0) rel = 0;
+            if (rel >= 64) rel = 63;
+
+            /* Allocate 8bpp slice for this row (slot 0) */
+            int key8 = row * 65 + 0;
+            if (lay.slice_map[key8] < 0)
+                lay.slice_map[key8] = compact++;
+
+            /* If any 4bpp face uses this CLUT, allocate 4bpp slice (slot rel+1) */
+            if (used_is4bpp[ci]) {
+                int key4 = row * 65 + rel + 1;  /* +1 to avoid 8bpp slot */
+                if (lay.slice_map[key4] < 0)
+                    lay.slice_map[key4] = compact++;
+            }
+        }
+        num_sub_pals = compact > 0 ? compact : 1;
+    }
+
+    int atlas_h = padded_h * num_sub_pals;
+    if (atlas_h > max_h) {
+        int max_slices = max_h / padded_h;
+        if (max_slices < 1) max_slices = 1;
+        num_sub_pals = max_slices;
+        atlas_h = padded_h * num_sub_pals;
+        /* Invalidate slices that got cut */
+        for (int i = 0; i < 16 * 65; i++)
+            if (lay.slice_map[i] >= num_sub_pals)
+                lay.slice_map[i] = -1;
+    }
+
+    lay.w = total_pw;
+    lay.h = atlas_h;
+    lay.bpp = bpp;
+    lay.vram_x = min_vx;
+    lay.vram_y = 0;  /* atlas covers full TY pages from y=0 */
+    lay.num_pal_rows = total_clut_rows;
+    lay.clut_base_y = clut_y_min;
+    lay.num_slices = num_sub_pals;
+    lay.clut_base_x = clut_base_x;
+
+    u8* rgba = (u8*)malloc((size_t)total_pw * atlas_h * 4);
+    if (!rgba) return -1;
+    /* Fill with opaque black (not transparent) so that faces with UVs
+       landing in unpopulated atlas regions render as solid black instead
+       of being discarded by the alpha test. */
+    {   size_t total_px = (size_t)total_pw * atlas_h;
+        for (size_t px = 0; px < total_px; px++) {
+            rgba[px*4]   = 0;    /* R */
+            rgba[px*4+1] = 0;    /* G */
+            rgba[px*4+2] = 0;    /* B */
+            rgba[px*4+3] = 255;  /* A = opaque */
+        }
+    }
+
+    /* Render each texture for EACH (CLUT Y, sub_pal) combo.
+       Strategy for mixed 8bpp/4bpp rooms:
+       - Atlas pixel width uses 4bpp convention (4 pixels per halfword)
+       - 8bpp TPage columns: render at 8bpp, pixel-double horizontally
+       - 4bpp TPage columns: render at 4bpp with per-sub-palette variants
+       The sub-pal variants only affect 4bpp regions; 8bpp regions are
+       identical across all sub-palette slices (pixel-doubled). */
+    RGBA8* palette = (RGBA8*)malloc(4096 * sizeof(RGBA8));
+    if (!palette) { free(rgba); return -1; }
+    for (int ti = 0; ti < n_tex; ti++) {
+        const DatEntry& tex = ar.entries[texes[ti].idx];
+        const u8* pix = tex.data; size_t pix_size = tex.size;
+        Buffer dec;
+        if (tex.type == DAT_LZSS1) {
+            if (lzss_decompress(tex.data, tex.size, dec))
+                { pix = dec.data; pix_size = dec.size; }
+        }
+
+        int vw = tex.w, vh = tex.h;
+        if (vw == 0 || vh == 0) continue;
+
+        /* Compute actual height from data size — DAT header h can be smaller
+           than the real data (e.g. door textures: h=40 but data = 64 rows).
+           Deswizzle block tiling requires the full height to decode correctly. */
+        int byte_w = vw * 2;
+        int actual_vh = (byte_w > 0 && pix_size > 0) ? (int)(pix_size / byte_w) : vh;
+        if (actual_vh < vh) actual_vh = vh;  /* never shrink below header */
+        vh = actual_vh;
+
+        int x_off_hw = texes[ti].vram_x - min_vx;
+
+        const DatEntry* pal = pairs[ti].pal;
+        int pal_vy = pairs[ti].pal_vram_y;
+        int this_pal_rows = pairs[ti].pal_rows;
+
+        /* Deswizzle once for this texture */
+        size_t total_bytes = (size_t)byte_w * vh;
+        u8* linear = (u8*)calloc(total_bytes, 1);
+        if (!linear) continue;
+        deswizzle_8bpp(pix, pix_size, linear, vw, vh);
+
+        /* Parse palette rows */
+        for (int pi2 = 0; pi2 < 4096; pi2++) palette[pi2] = RGBA8(0,0,0,0);
+        if (pal && pal->data && pal->size > 0) {
+            int np = (int)(pal->size / 512);
+            if (np < 1) np = 1;
+            if (np > 16) np = 16;
+            parse_palette(pal->data, pal->size, palette, np);
+        }
+
+        for (int row = 0; row < total_clut_rows; row++) {
+            int abs_clut_y = clut_y_min + row;
+            int pal_row_offset = abs_clut_y - pal_vy;
+            if (pal_row_offset < 0 || pal_row_offset >= this_pal_rows) {
+                if (this_pal_rows == 1) pal_row_offset = 0;
+                else continue;
+            }
+            if (pal_row_offset >= this_pal_rows)
+                pal_row_offset = this_pal_rows - 1;
+
+            for (int slot = 0; slot < 65; slot++) {
+                int map_key = row * 65 + slot;
+                int slice_idx = lay.slice_map[map_key];
+                if (slice_idx < 0) continue;
+
+                /* slot 0 = 8bpp rendering, slot 1..64 = 4bpp with rel_sub = slot-1 */
+                bool is_8bpp_slot = (slot == 0);
+                int rel_sub = is_8bpp_slot ? 0 : slot - 1;
+
+                /* Classify 4bpp sub-palette as decal overlay vs opaque texture.
+                   Decal = majority of 16 entries have STP=1 (blood splatters, overlays).
+                   Opaque = most entries STP=0 (character textures, walls).
+                   Only decal sub-palettes get STP alpha; opaque ones stay fully solid. */
+                bool is_4bpp_decal = false;
+                if (!is_8bpp_slot && pal && pal->data) {
+                    int actual_sub = rel_sub;
+                    int stp_count = 0;
+                    for (int ci = 1; ci < 16; ci++) { /* skip index 0 */
+                        size_t raw_off = (size_t)pal_row_offset * 512 + (actual_sub * 16 + ci) * 2;
+                        if (raw_off + 2 <= pal->size) {
+                            u16 raw = rd_u16(pal->data + raw_off);
+                            if (raw & 0x8000) stp_count++;
+                        }
+                    }
+                    is_4bpp_decal = (stp_count >= 8); /* majority threshold: 8+ out of 15 */
+                }
+
+                bool is_8bpp_pal = (pal && pal->size >= 512);
+                int y_off_in_slice = tex.y;
+                for (int y = 0; y < vh && (y + y_off_in_slice) < padded_h; y++) {
+                    int dst_y = slice_idx * padded_h + y_off_in_slice + y;
+                    if (dst_y >= atlas_h) break;
+
+                    for (int bx = 0; bx < byte_w; bx++) {
+                        size_t si = (size_t)y * byte_w + bx;
+                        u8 byte_val = (si < total_bytes) ? linear[si] : 0;
+
+                        int atlas_x = (x_off_hw * 2 + bx) * 2;
+                        if (atlas_x + 1 >= total_pw) continue;
+
+                        size_t di0 = ((size_t)dst_y * total_pw + atlas_x) * 4;
+                        size_t di1 = ((size_t)dst_y * total_pw + atlas_x + 1) * 4;
+
+                        if (is_8bpp_slot && is_8bpp_pal) {
+                            /* 8bpp: one pixel per byte, pixel-doubled */
+                            int pal_base_8 = pal_row_offset * 256;
+                            RGBA8 c8 = palette[pal_base_8 + byte_val];
+                            /* 8bpp index 0 is the background/mask index.
+                               0x0000 already has alpha=0 from parse_palette.
+                               0x8000 (STP black) at index 0 is also a mask —
+                               semi-trans primitives like blood trails need it
+                               transparent so the floor shows through. */
+                            if (byte_val == 0 && c8.a > 0 && pal && pal->data) {
+                                size_t raw_off = (size_t)pal_row_offset * 512;
+                                if (raw_off + 2 <= pal->size) {
+                                    u16 raw = rd_u16(pal->data + raw_off);
+                                    if (raw == 0x8000) c8.a = 0;
+                                }
+                            }
+                            rgba[di0]   = c8.r; rgba[di0+1] = c8.g;
+                            rgba[di0+2] = c8.b; rgba[di0+3] = c8.a;
+                            rgba[di1]   = c8.r; rgba[di1+1] = c8.g;
+                            rgba[di1+2] = c8.b; rgba[di1+3] = c8.a;
+                        } else {
+                            /* 4bpp: two nibbles per byte */
+                            int actual_sub = is_8bpp_slot ? 0 : rel_sub;
+                            int pal_base_4 = pal_row_offset * 256 + actual_sub * 16;
+                            u8 lo = byte_val & 0x0F;
+                            u8 hi = (byte_val >> 4) & 0x0F;
+                            RGBA8 c4_lo = palette[pal_base_4 + lo];
+                            RGBA8 c4_hi = palette[pal_base_4 + hi];
+                            /* Apply STP semi-transparency only for decal sub-palettes.
+                               Decal = majority of the 16 entries have STP=1.
+                               For opaque sub-palettes (shirt, character), STP is just
+                               a VRAM artifact and 0x8000 at index 0 = opaque black. */
+                            if (pal && pal->data && is_4bpp_decal) {
+                                size_t raw_off_lo = (size_t)pal_row_offset * 512 + (actual_sub * 16 + lo) * 2;
+                                size_t raw_off_hi = (size_t)pal_row_offset * 512 + (actual_sub * 16 + hi) * 2;
+                                if (raw_off_lo + 2 <= pal->size) {
+                                    u16 raw_lo = rd_u16(pal->data + raw_off_lo);
+                                    if (raw_lo == 0x8000) c4_lo.a = 0;
+                                    else if ((raw_lo & 0x8000) && c4_lo.a > 0) c4_lo.a = 128;
+                                }
+                                if (raw_off_hi + 2 <= pal->size) {
+                                    u16 raw_hi = rd_u16(pal->data + raw_off_hi);
+                                    if (raw_hi == 0x8000) c4_hi.a = 0;
+                                    else if ((raw_hi & 0x8000) && c4_hi.a > 0) c4_hi.a = 128;
+                                }
+                            }
+                            rgba[di0]   = c4_lo.r; rgba[di0+1] = c4_lo.g;
+                            rgba[di0+2] = c4_lo.b; rgba[di0+3] = c4_lo.a;
+                            rgba[di1]   = c4_hi.r; rgba[di1+1] = c4_hi.g;
+                            rgba[di1+2] = c4_hi.b; rgba[di1+3] = c4_hi.a;
+                        }
+                    }
+                }
+            }
+        }
+        free(linear);
+    }
+    free(palette);
+
+    *out_rgba = rgba;
+    return 1;
+}
+
+/* 2D sparse slice lookup: slot 0 = 8bpp, slot rel+1 = 4bpp sub-palette. */
+int atlas_face_slice(const TexAtlasLayout& a, u16 tpage, u16 clut)
+{
+    if (a.num_slices <= 1) return 0;
+    int clut_y = (clut >> 6) & 0x1FF;
+    int row = clut_y - a.clut_base_y;
+    if (row < 0) row = 0;
+    if (row >= 16) row = 15;
+
+    int slice_idx;
+    if (((tpage >> 7) & 3) == 0) { /* 4bpp face → slot rel+1 */
+        int clut_x = (clut & 0x3F) * 16;
+        int rel = (clut_x - a.clut_base_x) / 16;
+        if (rel < 0) rel = 0;
+        if (rel >= 64) rel = 63;
+        slice_idx = a.slice_map[row * 65 + rel + 1];
+        if (slice_idx < 0) slice_idx = a.slice_map[row * 65 + 0]; /* fallback: 8bpp */
+    } else { /* 8bpp face → slot 0 */
+        slice_idx = a.slice_map[row * 65 + 0];
+    }
+    if (slice_idx < 0) slice_idx = 0; /* ultimate fallback */
+    return slice_idx;
+}
+
+void atlas_face_uv(const TexAtlasLayout& a, u16 tpage, u16 clut,
+                   const u8 uv[3][2], float out[3][2])
+{
+    /* tex_ppw: pixels per VRAM halfword in the atlas */
+    int tex_ppw = (a.bpp == 4) ? 4 : (a.bpp == 16) ? 1 : 2;
+    int total_v_slices = a.num_slices;
+    int single_h = (total_v_slices > 1) ? a.h / total_v_slices : a.h;
+
+    /* PS1 tpage UV mapping */
+    int tx = tpage & 0xF;
+    int ty = (tpage >> 4) & 1;
+    int tp = (tpage >> 7) & 3;
+    int face_ppw = (tp == 0) ? 4 : (tp == 2) ? 1 : 2;
+
+    float tw = (a.w > 0) ? (float)a.w : 256.0f;
+    float th = (a.h > 0) ? (float)a.h : 256.0f;
+    float u_off = (float)((tx * 64 - a.vram_x) * tex_ppw) / tw;
+    float v_off = (float)(ty * 256 - a.vram_y) / (float)single_h;  /* within one slice */
+    float u_scl = (float)tex_ppw / ((float)face_ppw * tw);
+
+    float clut_v_off = 0.0f;
+    if (total_v_slices > 1) {
+        int slice_idx = atlas_face_slice(a, tpage, clut);
+        clut_v_off = (float)(slice_idx * single_h) / th;
+        v_off = v_off * ((float)single_h / th);
+    }
+
+    /* Sample texel centres.  The PSX reads texel (u, v) at UV (u, v);
+       bilinear filtering does so only at the texel's centre, and at its
+       corner takes a quarter from each of the texels around it.  Shifted
+       by half a texel, a face blends only texels inside its own UV
+       range.  Unshifted, a face mapped to one texel at the corner of a
+       solid patch took in the masked texels beside it and came out see-
+       through: ST108's wall box samples (240, 176) of a grey patch with
+       0x0000 left of and above it. */
+    for (int vi = 0; vi < 3; vi++) {
+        out[vi][0] = u_off + ((float)uv[vi][0] + 0.5f) * u_scl;
+        out[vi][1] = clut_v_off + v_off + ((float)uv[vi][1] + 0.5f) / th;
+    }
 }
 
 /*─── Linear 8bpp Render (no VRAM block swizzle) ────────────────*/
