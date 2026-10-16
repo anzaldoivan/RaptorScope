@@ -3,6 +3,7 @@
  *═══════════════════════════════════════════════════════════════════*/
 #include "formats/mesh.h"
 #include "formats/scd.h"
+#include "formats/dc2.h"
 #include "core/lzss.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -3835,6 +3836,15 @@ int collect_texture_usage(const DatArchive& archive, TexFaceUse** out)
 
     for (int i = 0; i < archive.count; i++) {
         const DatEntry& e = archive.entries[i];
+        if (archive.is_dc2) {
+            /* Dino Crisis 2: the package's models; rooms have no decoded mesh */
+            Buffer dec;
+            EmdModel model;
+            if (e.type == DAT_LZSS0 && dat_entry_payload(e, dec) &&
+                dc2_parse_model(dec.data, dec.size, e.load_base, model))
+                add_mesh_usage(model.mesh, faces, count, cap);
+            continue;
+        }
         if (!(e.y & 0x8000)) continue;
         if (e.type != DAT_LZSS0 && !is_raw_rdt_entry(e)) continue;
 

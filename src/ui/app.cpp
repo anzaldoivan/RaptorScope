@@ -2068,13 +2068,7 @@ static void on_entry_select(int sel_param)
                 if (g_app.archive->entries[j].type == DAT_PALETTE)
                     { pal = &g_app.archive->entries[j]; break; }
         }
-        /* Detect 4bpp vs 8bpp from palette size:
-           16-color palette (32 bytes) → 4bpp
-           256-color palette (512 bytes) → 8bpp */
-        if (pal && pal->size <= 32 && pal->size >= 4)
-            g_image.bpp = 4;
-        else
-            g_image.bpp = 8;
+        g_image.bpp = palette_bpp(pal ? pal->size : 0);
         g_image.render_entry(e, pal);
         InvalidateRect(g_image.hwnd, 0, FALSE);
     } break;
@@ -2458,10 +2452,7 @@ static void on_entry_select(int sel_param)
                         fake.size = (u32)ds;
                         fake.x = e.x; fake.y = e.y;
                         fake.w = e.w; fake.h = e.h;
-                        if (pal->size <= 32 && pal->size >= 4)
-                            g_image.bpp = 4;
-                        else
-                            g_image.bpp = 8;
+                        g_image.bpp = palette_bpp(pal->size);
                         g_image.render_entry(fake, pal);
                         panel = PANEL_IMAGE;
                         char buf[256];
@@ -2545,10 +2536,7 @@ static void on_entry_select(int sel_param)
                     if (g_app.archive->entries[j].type == DAT_PALETTE)
                         { pal = &g_app.archive->entries[j]; break; }
             }
-            if (pal && pal->size <= 32 && pal->size >= 4)
-                g_image.bpp = 4;
-            else
-                g_image.bpp = 8;
+            g_image.bpp = palette_bpp(pal ? pal->size : 0);
             g_image.render_entry(e, pal);
             char buf[256];
             _snprintf(buf, 255, "Entry %d: Raw Texture %ux%u, %u bytes",

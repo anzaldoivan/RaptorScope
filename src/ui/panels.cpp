@@ -439,8 +439,10 @@ void ImagePanel::render_entry(const DatEntry& tex, const DatEntry* pal, bool do_
     int pw, ph;
     texture_pixel_dims(vw, vh, bpp, pw, ph);
     u8* rgba = (u8*)calloc(pw * ph, 4);
+    /* At 4bpp, Up/Down steps through the palette's 16-colour sub-palettes */
     render_texture(pix, pix_size, pal ? pal->data : 0, pal ? pal->size : 0,
-                   vw, vh, bpp, rgba, do_deswizzle, pal_row, sub_pal);
+                   vw, vh, bpp, rgba, do_deswizzle,
+                   bpp == 4 ? 0 : pal_row, bpp == 4 ? pal_row : sub_pal);
     set_bitmap(rgba, pw, ph); free(rgba);
 }
 

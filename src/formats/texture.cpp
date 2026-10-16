@@ -117,6 +117,22 @@ void swizzle_8bpp(const u8* src, size_t src_size,
     }
 }
 
+/* Un-tile for display.  Every tile is stored whole, so the data of a
+   texture whose height is not a multiple of 32 has more rows than its
+   header says (WEP_P000.DAT's weapon: 64x136, 160 rows stored; ST100's
+   door textures likewise).  Un-tiled by the header height, the last tile
+   row is read as short tiles and its columns come out shuffled.  Returns
+   vram_w * 2 bytes a row, at least vram_h rows (malloc'd), or 0. */
+static u8* deswizzle_stored(const u8* src, size_t src_size, int vram_w, int vram_h)
+{
+    int byte_w = vram_w * 2;
+    int rows = byte_w > 0 ? (int)(src_size / byte_w) : 0;
+    if (rows < vram_h) rows = vram_h;
+    u8* linear = (u8*)malloc((size_t)byte_w * rows + 1);
+    if (linear) deswizzle_8bpp(src, src_size, linear, vram_w, rows);
+    return linear;
+}
+
 /*─── 8bpp Render ────────────────────────────────────────────────*/
 void render_8bpp(const u8* pixels, size_t pix_size,
                  const RGBA8* palette,
@@ -130,9 +146,8 @@ void render_8bpp(const u8* pixels, size_t pix_size,
     /* Deswizzle if needed */
     u8* linear = 0;
     if (do_deswizzle && pix_size > 0) {
-        linear = (u8*)malloc(total);
+        linear = deswizzle_stored(pixels, pix_size, vram_w, vram_h);
         if (!linear) return;
-        deswizzle_8bpp(pixels, pix_size, linear, vram_w, vram_h);
     } else {
         linear = (u8*)pixels;  /* use directly */
     }
@@ -168,9 +183,8 @@ void render_4bpp(const u8* pixels, size_t pix_size,
 
     u8* linear = 0;
     if (do_deswizzle && pix_size > 0) {
-        linear = (u8*)malloc(total_bytes);
+        linear = deswizzle_stored(pixels, pix_size, vram_w, vram_h);
         if (!linear) return;
-        deswizzle_8bpp(pixels, pix_size, linear, vram_w, vram_h);
     } else {
         linear = (u8*)pixels;
     }
@@ -313,7 +327,7 @@ bool render_texture_by_faces(const u8* pixels, size_t pix_size,
         return false;
 
     /* Palette entries: VRAM position, row count and decoded colours */
-    struct PalRef { int x, y, rows; };
+    struct PalRef { int x, y, w, rows; };
     PalRef pals[TEXUSE_MAX_PALS]; int n_pals = 0;
     RGBA8* pal_rgba = (RGBA8*)malloc(TEXUSE_MAX_PALS * 4096 * sizeof(RGBA8));
     if (!pal_rgba) return false;
@@ -323,7 +337,7 @@ bool render_texture_by_faces(const u8* pixels, size_t pix_size,
         int rows = (int)(e.size / 512);
         if (rows < 1) rows = 1;
         if (rows > 16) rows = 16;
-        pals[n_pals].x = e.x; pals[n_pals].y = e.y; pals[n_pals].rows = rows;
+        pals[n_pals].x = e.x; pals[n_pals].y = e.y; pals[n_pals].w = e.w; pals[n_pals].rows = rows;
         parse_palette(e.data, e.size, pal_rgba + (size_t)n_pals * 4096, rows);
         n_pals++;
     }
@@ -351,10 +365,21 @@ bool render_texture_by_faces(const u8* pixels, size_t pix_size,
 
         int cx = (f.clut & 0x3F) * 16;
         int cy = (f.clut >> 6) & 0x1FF;
-        int p = 0;
-        while (p < n_pals && !(cy >= pals[p].y && cy < pals[p].y + pals[p].rows &&
-                               cx >= pals[p].x && cx < pals[p].x + 256))
-            p++;
+        /* DC2 packages put several short palettes on one row (CORE.DAT has
+           five on row 503), so there the palette's own width decides. */
+        int p = n_pals;
+        if (archive.is_dc2) {
+            p = 0;
+            while (p < n_pals && !(cy >= pals[p].y && cy < pals[p].y + pals[p].rows &&
+                                   cx >= pals[p].x && cx < pals[p].x + pals[p].w))
+                p++;
+        }
+        if (p == n_pals) {
+            p = 0;
+            while (p < n_pals && !(cy >= pals[p].y && cy < pals[p].y + pals[p].rows &&
+                                   cx >= pals[p].x && cx < pals[p].x + 256))
+                p++;
+        }
         if (p == n_pals) continue;
 
         FaceRef& r = refs[n_refs++];

@@ -26,6 +26,11 @@ void swizzle_8bpp(const u8* src, size_t src_size,
 
 /*─── Render to RGBA bitmap ──────────────────────────────────────*/
 
+/* The renderers below un-tile by the rows the data holds, which can be
+   more than vram_h: a texture whose height is not a multiple of 32 is
+   still stored as whole 32-row tiles (a 64x136 one has 160 rows), and
+   only the first vram_h rows are drawn. */
+
 /* Render 8bpp indexed texture to RGBA.
    pixel_w = vram_w * 2 (byte width = pixel width for 8bpp).
    palette must have 256 RGBA8 entries.
@@ -66,6 +71,14 @@ void render_linear_8bpp(const u8* pixels, size_t pix_size,
                         const u8* pal_data, size_t pal_size,
                         int pixel_w, int pixel_h,
                         u8* out_rgba, int src_stride = 0);
+
+/* Colour depth a palette entry is for, from its size: a palette shorter
+   than one 256-colour row is 16-colour sub-palettes side by side (32
+   bytes each; WEP_P000.DAT's weapon palette has three), so its texture
+   is 4bpp. */
+inline int palette_bpp(size_t pal_size) {
+    return (pal_size >= 4 && pal_size < 512) ? 4 : 8;
+}
 
 /* Calculate rendered pixel dimensions for a given vram_w/h and bpp.
    Returns pixel width and height. */

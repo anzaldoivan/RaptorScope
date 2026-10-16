@@ -536,7 +536,8 @@ struct TexFaceUse {
 };
 
 /* Collect the textured faces of every room, character and door mesh in
-   the archive.  *out is malloc'd (caller frees); returns the face count. */
+   the archive, or of every model of a Dino Crisis 2 package.  *out is
+   malloc'd (caller frees); returns the face count. */
 int collect_texture_usage(const DatArchive& archive, TexFaceUse** out);
 
 #endif /* DC_FORMATS_MESH_H */
