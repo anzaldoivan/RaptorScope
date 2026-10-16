@@ -21,8 +21,19 @@ enum DatEntryType {
     DAT_LZSS0   = 7,  /* LZSS compressed (models, bgs, room)  */
     DAT_LZSS1   = 8,  /* LZSS compressed 8bpp texture         */
     DAT_TEXTURE_LINEAR = 9,  /* Linear 8bpp texture (w/h are pixel dims, no VRAM deswizzle) */
+    /* Dino Crisis 2 types with no DC1 equivalent (the number in the file is
+       DatEntry::raw_type).  DC2's 0, 1, 2 mean the same as DC1's, and its 5
+       and 6 are parsed as DAT_LZSS0 and DAT_LZSS1. */
+    DAT_DC2_SOUND = 10,  /* DC2 type 3: sound bank (layout not decoded) */
+    DAT_DC2_MP3   = 11,  /* DC2 type 4: MPEG-1 Layer III music stream  */
+    DAT_DC2_UNK7  = 12,  /* DC2 type 7: unknown                        */
+    DAT_DC2_LZSS2 = 13,  /* DC2 type 8: LZSS compressed                */
     DAT_TYPE_COUNT
 };
+
+/* Header entry size: 16 bytes in Dino Crisis, 32 in Dino Crisis 2 */
+#define DAT_ENTRY_DC1 16
+#define DAT_ENTRY_DC2 32
 
 const char* dat_type_name(int type);
 const char* dat_type_ext(int type);
@@ -37,10 +48,14 @@ struct DatEntry {
     u8*  data;        /* pointer to entry data */
     u8   flags;       /* bit 0: skip deswizzle (raw linear) */
     bool owned;       /* true if data was malloc'd separately (replaced entry) */
+    u32  raw_type;    /* type number as stored in the file (differs from type in DC2) */
+    u32  load_base;   /* DC2: first reserve word, the address the entry loads at
+                         (same bytes as x, y); 0 in DC1 */
 
     DatEntry()
         : type(0), size(0), x(0), y(0), w(0), h(0)
-        , offset(0), data(0), flags(0), owned(false) {}
+        , offset(0), data(0), flags(0), owned(false)
+        , raw_type(0), load_base(0) {}
 };
 
 #define DAT_FLAG_RAW_LINEAR  0x01  /* render as raw linear, no deswizzle */
@@ -54,9 +69,14 @@ struct DatArchive {
     Str256    filename;
     bool      is_item_bank;  /* true if parsed as item sprite bank */
     bool      modified;       /* true if any entry was replaced */
+    bool      is_dc2;         /* Dino Crisis 2 package: 32-byte header entries */
+    size_t    tail_off;       /* offset in raw of the bytes after the last entry;
+                                 raw_size when there are none (DC2 ST*.DBS
+                                 keeps its background images there) */
 
     DatArchive() : entries(0), count(0), raw(0), raw_size(0),
-                   is_item_bank(false), modified(false) {}
+                   is_item_bank(false), modified(false),
+                   is_dc2(false), tail_off(0) {}
     ~DatArchive() { free_data(); }
 
     void free_data() {
@@ -70,6 +90,8 @@ struct DatArchive {
         raw_size = 0;
         is_item_bank = false;
         modified = false;
+        is_dc2 = false;
+        tail_off = 0;
     }
 
 private:
@@ -87,9 +109,12 @@ bool dat_parse_file(const char* path, DatArchive& archive);
    must keep it alive as long as archive is used). */
 bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive);
 
-/* Entry contents as loaded in memory: LZSS entries (types 7, 8) are
-   decompressed, everything else is copied as-is. */
+/* Entry contents as loaded in memory: LZSS entries (types 7, 8, and DC2's
+   type 8) are decompressed, everything else is copied as-is. */
 bool dat_entry_payload(const DatEntry& entry, Buffer& out);
+
+/* True if the header sector is a Dino Crisis 2 one (32-byte entries). */
+bool dat_is_dc2(const u8* raw, size_t raw_size);
 
 /* Check if raw data is a Dino Crisis item sprite bank (item.dat). */
 bool dat_is_item_bank(const u8* raw, size_t raw_size);
@@ -98,13 +123,18 @@ bool dat_is_item_bank(const u8* raw, size_t raw_size);
 #define ITEM_BANK_BLOCK_CLUT   0x200    /* CLUT size (512 bytes) at start of each block */
 
 /* Build .dat file bytes from entries.
-   Returns allocated buffer and sets out_size.  Caller owns result. */
-u8* dat_build(const DatEntry* entries, int count, size_t& out_size);
+   Returns allocated buffer and sets out_size.  Caller owns result.
+   dc2 writes a Dino Crisis 2 package: 32-byte header entries holding each
+   entry's raw_type, and zero padding.  tail is copied after the last
+   entry (DatArchive::tail_off). */
+u8* dat_build(const DatEntry* entries, int count, size_t& out_size,
+              bool dc2 = false, const u8* tail = 0, size_t tail_size = 0);
 
 /* Write rebuilt .dat to file. */
-bool dat_write_file(const char* path, const DatEntry* entries, int count);
+bool dat_write_file(const char* path, const DatEntry* entries, int count,
+                    bool dc2 = false, const u8* tail = 0, size_t tail_size = 0);
 
-/* Replace an entry's data.  If the entry type is LZSS (7 or 8),
+/* Replace an entry's data.  If the entry type is LZSS (7, 8 or DC2's 8),
    the caller provides DECOMPRESSED data and this function compresses it.
    Otherwise, data is stored as-is.  The old data is freed if owned.
    Returns true on success. */

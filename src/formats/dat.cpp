@@ -10,11 +10,13 @@
 /*─── Type name tables ───────────────────────────────────────────*/
 static const char* s_type_names[] = {
     "DATA", "TEXTURE", "PALETTE", "SNDH", "SNDB",
-    "SNDE", "UNK6", "LZSS0", "LZSS1", "TEX_LIN"
+    "SNDE", "UNK6", "LZSS0", "LZSS1", "TEX_LIN",
+    "SOUND", "MP3", "UNK7", "LZSS2"
 };
 static const char* s_type_exts[] = {
     ".bin", ".raw", ".pal", ".gian", ".vag",
-    ".seq", ".bin", ".lz", ".lz", ".raw"
+    ".seq", ".bin", ".lz", ".lz", ".raw",
+    ".bin", ".mp3", ".bin", ".lz"
 };
 static const char* s_type_descs[] = {
     "Room scripts, triggers, metadata",
@@ -26,7 +28,11 @@ static const char* s_type_descs[] = {
     "Unknown",
     "LZSS compressed (models, backgrounds, room data)",
     "LZSS compressed 8bpp texture",
-    "Linear 8bpp texture (item sprite bank)"
+    "Linear 8bpp texture (item sprite bank)",
+    "DC2 sound bank (layout not decoded)",
+    "DC2 music stream (MPEG-1 Layer III)",
+    "DC2 unknown (type 7)",
+    "DC2 LZSS compressed (type 8)"
 };
 
 const char* dat_type_name(int type) {
@@ -74,6 +80,34 @@ bool dat_parse_file(const char* path, DatArchive& archive)
     return dat_parse_memory(raw, (size_t)fsize, archive);
 }
 
+/*─── Dino Crisis 2 detection and type numbers ───────────────────*/
+
+/* DC2 stores the same package with 32-byte header entries, so the second
+   16 bytes of the file are the first entry's padding and are zero.  A DC1
+   package can have zeros there too (an empty DATA entry); its unused
+   header slots are then 16-byte "dummy header" fillers back to back,
+   where DC2 follows each filler with 16 zero bytes.
+   (dinorand FORMAT-DC2.md, K6; the zero probe is the SDK's rule.) */
+bool dat_is_dc2(const u8* raw, size_t raw_size)
+{
+    static const u8 dummy_sig[] = "dummy header";
+    if (raw_size < DAT_SECTOR) return false;
+    for (int i = 16; i < 32; i++)
+        if (raw[i]) return false;
+    for (size_t off = 32; off + 32 <= DAT_SECTOR; off += 16)
+        if (memcmp(raw + off, dummy_sig, 12) == 0 &&
+            memcmp(raw + off + 16, dummy_sig, 12) == 0)
+            return false;
+    return true;
+}
+
+/* DC2 type number -> DatEntryType.  0, 1 and 2 are the same as DC1's; 5
+   and 6 are DC1's LZSS0 and LZSS1 (same codec, K7). */
+static const u32 s_dc2_types[9] = {
+    DAT_DATA, DAT_TEXTURE, DAT_PALETTE, DAT_DC2_SOUND, DAT_DC2_MP3,
+    DAT_LZSS0, DAT_LZSS1, DAT_DC2_UNK7, DAT_DC2_LZSS2
+};
+
 /*─── Parse .dat from memory ─────────────────────────────────────*/
 bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive)
 {
@@ -85,15 +119,22 @@ bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive)
     if (is_item_sprite_bank(raw, raw_size))
         return parse_item_bank(raw, raw_size, archive);
 
-    /* Count entries in header */
+    /* Dino Crisis 2 packages have 32-byte header entries; the layout is
+       otherwise the same. */
+    bool dc2 = dat_is_dc2(raw, raw_size);
+    size_t stride = dc2 ? DAT_ENTRY_DC2 : DAT_ENTRY_DC1;
+
+    /* Count entries in header.  A DC2 header also ends at a zero-size
+       entry: ITEM.DAT's first sector is all zeros and is not a package. */
     int count = 0;
     size_t off = 0;
-    while (off + 16 <= DAT_SECTOR) {
+    while (off + stride <= DAT_SECTOR) {
         if (memcmp(raw + off, dummy_sig, 12) == 0) break;
         u32 t = rd_u32(raw + off);
         if (t > 8) break;
+        if (dc2 && rd_u32(raw + off + 4) == 0) break;
         count++;
-        off += 16;
+        off += stride;
     }
 
     if (count == 0) {
@@ -104,24 +145,29 @@ bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive)
 
     archive.entries = new DatEntry[count];
     archive.count = count;
+    archive.is_dc2 = dc2;
 
     /* Parse header entries */
     off = 0;
     for (int i = 0; i < count; i++) {
         DatEntry& e = archive.entries[i];
-        e.type = rd_u32(raw + off);
+        e.raw_type = rd_u32(raw + off);
+        e.type = dc2 ? s_dc2_types[e.raw_type] : e.raw_type;
         e.size = rd_u32(raw + off + 4);
         e.x    = rd_u16(raw + off + 8);
         e.y    = rd_u16(raw + off + 10);
         e.w    = rd_u16(raw + off + 12);
         e.h    = rd_u16(raw + off + 14);
-        off += 16;
+        if (dc2) e.load_base = rd_u32(raw + off + 8);
+        off += stride;
     }
 
-    /* Assign data pointers */
+    /* Assign data pointers.  An entry that runs past the end of the file
+       gets no data, and the entries after it keep their places. */
     size_t data_off = DAT_SECTOR;
     for (int i = 0; i < count; i++) {
         DatEntry& e = archive.entries[i];
+        u32 stored = e.size;
         e.offset = (u32)data_off;
         if (data_off + e.size <= raw_size) {
             e.data = raw + data_off;
@@ -129,8 +175,9 @@ bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive)
             e.data = 0;
             e.size = 0;
         }
-        data_off += dc_align_sector(e.size);
+        data_off += dc_align_sector(stored);
     }
+    archive.tail_off = data_off < raw_size ? data_off : raw_size;
 
     return true;
 }
@@ -138,7 +185,8 @@ bool dat_parse_memory(u8* raw, size_t raw_size, DatArchive& archive)
 /*─── Entry payload ─────────────────────────────────────────────*/
 bool dat_entry_payload(const DatEntry& entry, Buffer& out)
 {
-    if (entry.type == DAT_LZSS0 || entry.type == DAT_LZSS1)
+    if (entry.type == DAT_LZSS0 || entry.type == DAT_LZSS1 ||
+        entry.type == DAT_DC2_LZSS2)
         return lzss_decompress(entry.data, entry.size, out);
     out.clear();
     if (entry.data && entry.size > 0) out.append(entry.data, entry.size);
@@ -146,35 +194,43 @@ bool dat_entry_payload(const DatEntry& entry, Buffer& out)
 }
 
 /*─── Build .dat file bytes ──────────────────────────────────────*/
-u8* dat_build(const DatEntry* entries, int count, size_t& out_size)
+u8* dat_build(const DatEntry* entries, int count, size_t& out_size, bool dc2,
+              const u8* tail, size_t tail_size)
 {
+    /* The header is one sector: 128 DC1 entries or 64 DC2 entries */
+    size_t stride = dc2 ? DAT_ENTRY_DC2 : DAT_ENTRY_DC1;
+    out_size = 0;
+    if (count < 0 || (size_t)count * stride > DAT_SECTOR) return 0;
+
     /* Calculate total size */
     size_t total = DAT_SECTOR;
     for (int i = 0; i < count; i++)
         total += dc_align_sector(entries[i].size);
+    if (!tail) tail_size = 0;
+    total += tail_size;
 
     u8* buf = (u8*)calloc(total, 1);
-    if (!buf) { out_size = 0; return 0; }
+    if (!buf) return 0;
 
-    /* Write header */
+    /* Write header.  A DC2 entry is the same 16 bytes followed by 16
+       zero bytes; the game reads the table at that stride, so a 16-byte
+       table crashes it (dinorand DC2-ROOM-CONTAINER-STRIDE-CRASH-RCA.md). */
     static const u8 dummy[] = "dummy header    ";
     size_t hoff = 0;
     for (int i = 0; i < count; i++) {
         const DatEntry& e = entries[i];
-        u32 sz = e.size;
-        if (e.data) sz = e.size;
-        wr_u32(buf + hoff,      e.type);
-        wr_u32(buf + hoff + 4,  sz);
+        wr_u32(buf + hoff,      dc2 ? e.raw_type : e.type);
+        wr_u32(buf + hoff + 4,  e.size);
         wr_u16(buf + hoff + 8,  e.x);
         wr_u16(buf + hoff + 10, e.y);
         wr_u16(buf + hoff + 12, e.w);
         wr_u16(buf + hoff + 14, e.h);
-        hoff += 16;
+        hoff += stride;
     }
     /* Fill rest of header with dummy markers */
-    while (hoff + 16 <= DAT_SECTOR) {
+    while (hoff + stride <= DAT_SECTOR) {
         memcpy(buf + hoff, dummy, 16);
-        hoff += 16;
+        hoff += stride;
     }
 
     /* Write data */
@@ -183,24 +239,26 @@ u8* dat_build(const DatEntry* entries, int count, size_t& out_size)
         const DatEntry& e = entries[i];
         if (e.data && e.size > 0)
             memcpy(buf + doff, e.data, e.size);
-        /* Pad to sector boundary with dummy pattern */
+        /* Pad to sector boundary: DC1 with the dummy pattern, DC2 with zeros */
         size_t aligned = dc_align_sector(e.size);
         size_t pad_start = doff + e.size;
         size_t pad_end   = doff + aligned;
-        for (size_t p = pad_start; p + 16 <= pad_end; p += 16)
+        for (size_t p = pad_start; !dc2 && p + 16 <= pad_end; p += 16)
             memcpy(buf + p, dummy, 16);
         doff += aligned;
     }
+    if (tail_size) memcpy(buf + doff, tail, tail_size);
 
     out_size = total;
     return buf;
 }
 
 /*─── Write .dat to file ─────────────────────────────────────────*/
-bool dat_write_file(const char* path, const DatEntry* entries, int count)
+bool dat_write_file(const char* path, const DatEntry* entries, int count, bool dc2,
+                    const u8* tail, size_t tail_size)
 {
     size_t size = 0;
-    u8* buf = dat_build(entries, count, size);
+    u8* buf = dat_build(entries, count, size, dc2, tail, tail_size);
     if (!buf) return false;
 
     FILE* f = fopen(path, "wb");
@@ -218,7 +276,8 @@ bool dat_replace_entry(DatEntry& entry, const u8* new_data, size_t new_size,
     u8* final_data = 0;
     size_t final_size = 0;
 
-    if (auto_compress && (entry.type == DAT_LZSS0 || entry.type == DAT_LZSS1)) {
+    if (auto_compress && (entry.type == DAT_LZSS0 || entry.type == DAT_LZSS1 ||
+                          entry.type == DAT_DC2_LZSS2)) {
         /* LZSS compress: new_data is decompressed, store compressed */
         Buffer comp;
         if (!lzss_compress(new_data, new_size, comp))

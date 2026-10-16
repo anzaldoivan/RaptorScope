@@ -157,7 +157,6 @@ Ordered with memory safety and data loss first.
   - `dat_write_file`'s result is ignored.
   - `archive->modified` is never checked on close or exit.
   - Ctrl+S (`IDM_FILE_SAVE`) has no handler.
-- **B16** **A truncated DAT entry misplaces every entry after it.** `dat_parse_memory` sets `size = 0` for an entry that runs past the end of the file, then advances `data_off` by 0.
 - **B17** **Blend modes are approximated wrongly.** `ViewerPanel3D::render` draws ABR 3 (B+F/4) with the same full-additive blend as ABR 1, and ABR 2 (B−F) as a multiply. The comments say quarter-additive and subtractive.
 - **B18** **Blending decided from ABR alone (verify).**
   - The viewer (`build_mesh_lists`) and room GLB export (`export_room_glb`) treat ABR 0 as always opaque and ABR 1–3 as always blended.
@@ -299,7 +298,6 @@ Ordered with memory safety and data loss first.
   - The zone-height box in `ov_draw_zone` never draws, because height is never set.
   - `indent` in `scd_disassemble` is never incremented.
   - Unused locals: `jump`, `op`, `defname`, `pw`, `frac`, `room_verts`.
-  - `dat_build`'s `if (e.data) sz = e.size;` is a no-op.
 - **M3** **Duplicated mesh parsing logic.**
   - Room face decoding (40-byte triangle and 52-byte quad to verts/tris, with winding and UV swaps) is copy-pasted in five parsers.
   - Two section walkers use different limits: 64 vs 200 sections, and pointer thresholds of 0x40 vs 0x100.
