@@ -507,11 +507,13 @@ bool render_texture_by_faces(const u8* pixels, size_t pix_size,
  *═══════════════════════════════════════════════════════════════════*/
 int build_texture_atlas(const DatArchive& ar,
                         const u16* used_cluts, const bool* used_is4bpp, int n_used,
-                        int max_h, TexAtlasLayout& lay, u8** out_rgba)
+                        int max_h, TexAtlasLayout& lay, u8** out_rgba,
+                        const bool* used_solid8, const bool* used_mask8)
 {
     *out_rgba = 0;
     memset(&lay, 0, sizeof(lay));
     memset(lay.slice_map, -1, sizeof(lay.slice_map));
+    memset(lay.solid8_slice, -1, sizeof(lay.solid8_slice));
 
     /* Collect texture and palette entries */
     struct TexInfo { int idx; int vram_x, vram_w, vram_h; };
@@ -649,6 +651,8 @@ int build_texture_atlas(const DatArchive& ar,
     memset(slice_pal, -1, sizeof(slice_pal));
     memset(slice_base, 0, sizeof(slice_base));
     memset(row_8bpp, 0, sizeof(row_8bpp));
+    /* Per row: slot 0 keeps 0x8000 opaque (only solid 8bpp faces use the row) */
+    bool slot0_solid[16] = {};
     if (n_pal > 0) {
         clut_base_x = pals[0].vram_x;
         /* DC2 packages put palettes at several x on a row (WEP_P000's is
@@ -661,6 +665,7 @@ int build_texture_atlas(const DatArchive& ar,
         int compact = 0;
         /* Always allocate 8bpp slice for row 0 */
         lay.slice_map[0 * 65 + 0] = compact++;
+        bool row_solid[16] = {}, row_mask[16] = {};
         for (int ci = 0; ci < n_used; ci++) {
             u16 cl = used_cluts[ci];
             int cy = (cl >> 6) & 0x1FF;
@@ -676,6 +681,8 @@ int build_texture_atlas(const DatArchive& ar,
             int key8 = row * 65 + 0;
             if (lay.slice_map[key8] < 0)
                 lay.slice_map[key8] = compact++;
+            if (used_solid8 && used_solid8[ci]) row_solid[row] = true;
+            if (used_mask8 && used_mask8[ci])   row_mask[row] = true;
 
             /* If any 4bpp face uses this CLUT, allocate 4bpp slice (slot rel+1) */
             int key4 = row * 65 + rel + 1;  /* +1 to avoid 8bpp slot */
@@ -707,6 +714,14 @@ int build_texture_atlas(const DatArchive& ar,
                 slice_pal[key4] = found; slice_base[key4] = first;
             }
         }
+        /* A row with both kinds of 8bpp face gets a second, solid slice.
+           These come last, so the height cap drops them first and the
+           faces fall back to slot 0. */
+        for (int row = 0; row < 16; row++) {
+            slot0_solid[row] = row_solid[row] && !row_mask[row];
+            if (row_solid[row] && row_mask[row])
+                lay.solid8_slice[row] = compact++;
+        }
         num_sub_pals = compact > 0 ? compact : 1;
     }
 
@@ -720,6 +735,9 @@ int build_texture_atlas(const DatArchive& ar,
         for (int i = 0; i < 16 * 65; i++)
             if (lay.slice_map[i] >= num_sub_pals)
                 lay.slice_map[i] = -1;
+        for (int i = 0; i < 16; i++)
+            if (lay.solid8_slice[i] >= num_sub_pals)
+                lay.solid8_slice[i] = -1;
     }
 
     lay.w = total_pw;
@@ -787,13 +805,16 @@ int build_texture_atlas(const DatArchive& ar,
         for (int pi2 = 0; pi2 < 4096; pi2++) palette[pi2] = RGBA8(0,0,0,0);
 
         for (int row = 0; row < total_clut_rows; row++) {
-            for (int slot = 0; slot < 65; slot++) {
-                int map_key = row * 65 + slot;
-                int slice_idx = lay.slice_map[map_key];
+            for (int slot = 0; slot < 66; slot++) {
+                /* slot 65 = the row's solid 8bpp slice, outside slice_map;
+                   it decodes as slot 0 does, keeping 0x8000 */
+                int map_key = row * 65 + (slot == 65 ? 0 : slot);
+                int slice_idx = (slot == 65) ? lay.solid8_slice[row] : lay.slice_map[map_key];
                 if (slice_idx < 0) continue;
 
                 /* slot 0 = 8bpp rendering, slot 1..64 = 4bpp with rel_sub = slot-1 */
-                bool is_8bpp_slot = (slot == 0);
+                bool is_8bpp_slot = (slot == 0 || slot == 65);
+                bool mask_8000 = (slot == 0 && !slot0_solid[row]);
                 int rel_sub = is_8bpp_slot ? 0 : slot - 1;
 
                 /* The palette for this texture in this slice, and the index
@@ -892,8 +913,11 @@ int build_texture_atlas(const DatArchive& ar,
                                Not in DC2: its models are drawn opaque, where
                                0x8000 is black.  E20, E30, E50, E90, EA0 and
                                SC05 have it at index 0 and use the index for
-                               dark texels, which showed as holes. */
-                            if (!ar.is_dc2 && byte_val == 0 && c8.a > 0 && pal && pal->data) {
+                               dark texels, which showed as holes.  In DC1
+                               too a face without the semi-transparency bit
+                               draws it as opaque black: the solid slice
+                               (slot 65) keeps it. */
+                            if (!ar.is_dc2 && mask_8000 && byte_val == 0 && c8.a > 0 && pal && pal->data) {
                                 size_t raw_off = (size_t)base8 * 2;
                                 if (raw_off + 2 <= pal->size) {
                                     u16 raw = rd_u16(pal->data + raw_off);
@@ -945,8 +969,9 @@ int build_texture_atlas(const DatArchive& ar,
     return 1;
 }
 
-/* 2D sparse slice lookup: slot 0 = 8bpp, slot rel+1 = 4bpp sub-palette. */
-int atlas_face_slice(const TexAtlasLayout& a, u16 tpage, u16 clut)
+/* 2D sparse slice lookup: slot 0 = 8bpp, slot rel+1 = 4bpp sub-palette.
+   A solid 8bpp face uses the row's solid8_slice when it has one. */
+int atlas_face_slice(const TexAtlasLayout& a, u16 tpage, u16 clut, bool solid)
 {
     if (a.num_slices <= 1) return 0;
     int clut_y = (clut >> 6) & 0x1FF;
@@ -964,13 +989,15 @@ int atlas_face_slice(const TexAtlasLayout& a, u16 tpage, u16 clut)
         if (slice_idx < 0) slice_idx = a.slice_map[row * 65 + 0]; /* fallback: 8bpp */
     } else { /* 8bpp face → slot 0 */
         slice_idx = a.slice_map[row * 65 + 0];
+        if (solid && a.solid8_slice[row] >= 0)
+            slice_idx = a.solid8_slice[row];
     }
     if (slice_idx < 0) slice_idx = 0; /* ultimate fallback */
     return slice_idx;
 }
 
 void atlas_face_uv(const TexAtlasLayout& a, u16 tpage, u16 clut,
-                   const u8 uv[3][2], float out[3][2])
+                   const u8 uv[3][2], float out[3][2], bool solid)
 {
     /* tex_ppw: pixels per VRAM halfword in the atlas */
     int tex_ppw = (a.bpp == 4) ? 4 : (a.bpp == 16) ? 1 : 2;
@@ -991,7 +1018,7 @@ void atlas_face_uv(const TexAtlasLayout& a, u16 tpage, u16 clut,
 
     float clut_v_off = 0.0f;
     if (total_v_slices > 1) {
-        int slice_idx = atlas_face_slice(a, tpage, clut);
+        int slice_idx = atlas_face_slice(a, tpage, clut, solid);
         clut_v_off = (float)(slice_idx * single_h) / th;
         v_off = v_off * ((float)single_h / th);
     }

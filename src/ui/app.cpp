@@ -1735,13 +1735,18 @@ static u8* build_archive_atlas(DatArchive* src, bool force, TexAtlasLayout& lay)
     static DatArchive* s_cached_archive = 0;
     static int         s_cached_n_cluts = 0;
     static u16         s_cached_cluts[512];
+    static bool        s_cached_solid8[512], s_cached_mask8[512];
     bool same_cluts = (g_viewer3d.n_used_cluts == s_cached_n_cluts &&
-                       memcmp(s_cached_cluts, g_viewer3d.used_cluts, g_viewer3d.n_used_cluts * 2) == 0);
+                       memcmp(s_cached_cluts, g_viewer3d.used_cluts, g_viewer3d.n_used_cluts * 2) == 0 &&
+                       memcmp(s_cached_solid8, g_viewer3d.used_clut_solid8, g_viewer3d.n_used_cluts) == 0 &&
+                       memcmp(s_cached_mask8, g_viewer3d.used_clut_mask8, g_viewer3d.n_used_cluts) == 0);
     if (!force && &ar == s_cached_archive && same_cluts && g_viewer3d.tex_w > 0)
         return 0;
     s_cached_archive = &ar;
     s_cached_n_cluts = g_viewer3d.n_used_cluts;
     memcpy(s_cached_cluts, g_viewer3d.used_cluts, g_viewer3d.n_used_cluts * 2);
+    memcpy(s_cached_solid8, g_viewer3d.used_clut_solid8, g_viewer3d.n_used_cluts);
+    memcpy(s_cached_mask8, g_viewer3d.used_clut_mask8, g_viewer3d.n_used_cluts);
 
     /* Cap atlas height to GL max texture size */
     GLint gl_max = 16384; /* conservative default */
@@ -1754,7 +1759,8 @@ static u8* build_archive_atlas(DatArchive* src, bool force, TexAtlasLayout& lay)
 
     u8* rgba = 0;
     int built = build_texture_atlas(ar, g_viewer3d.used_cluts, g_viewer3d.used_clut_is4bpp,
-                                    g_viewer3d.n_used_cluts, gl_max, lay, &rgba);
+                                    g_viewer3d.n_used_cluts, gl_max, lay, &rgba,
+                                    g_viewer3d.used_clut_solid8, g_viewer3d.used_clut_mask8);
     if (built == 0) {
         /* No valid texture in this archive — clear any stale texture from previous file */
         g_viewer3d.clear_texture();
@@ -1770,6 +1776,7 @@ static u8* build_archive_atlas(DatArchive* src, bool force, TexAtlasLayout& lay)
     g_viewer3d.num_sub_pals = lay.num_slices;
     g_viewer3d.clut_base_x = lay.clut_base_x;
     memcpy(g_viewer3d.slice_map, lay.slice_map, sizeof(g_viewer3d.slice_map));
+    memcpy(g_viewer3d.solid8_slice, lay.solid8_slice, sizeof(g_viewer3d.solid8_slice));
     return rgba;
 }
 
@@ -2133,6 +2140,8 @@ static bool dc2_show_model(int idx, const DatEntry& e, const u8* dd, size_t ds)
     g_viewer3d.n_used_cluts = 0;
     memset(g_viewer3d.slice_map, -1, sizeof(g_viewer3d.slice_map));
     memset(g_viewer3d.used_clut_is4bpp, 0, sizeof(g_viewer3d.used_clut_is4bpp));
+    memset(g_viewer3d.used_clut_solid8, 0, sizeof(g_viewer3d.used_clut_solid8));
+    memset(g_viewer3d.used_clut_mask8, 0, sizeof(g_viewer3d.used_clut_mask8));
     g_viewer3d.desired_bpp = (depth == 0) ? 4 : (depth == 2) ? 16 : 8;
     if (em.tri_count > 0) {
         g_viewer3d.used_cluts[0] = clut;
@@ -2415,6 +2424,8 @@ static void on_entry_select(int sel_param)
                     g_viewer3d.n_used_cluts = 0;
                     memset(g_viewer3d.slice_map, -1, sizeof(g_viewer3d.slice_map));
                     memset(g_viewer3d.used_clut_is4bpp, 0, sizeof(g_viewer3d.used_clut_is4bpp));
+                    memset(g_viewer3d.used_clut_solid8, 0, sizeof(g_viewer3d.used_clut_solid8));
+                    memset(g_viewer3d.used_clut_mask8, 0, sizeof(g_viewer3d.used_clut_mask8));
                     if (g_emd_model->mesh.tri_count > 0) {
                         int tp0 = (g_emd_model->mesh.tris[0].tpage >> 7) & 3;
                         g_viewer3d.desired_bpp = (tp0 == 0) ? 4 : (tp0 == 2) ? 16 : 8;
@@ -2437,6 +2448,8 @@ static void on_entry_select(int sel_param)
                             }
                             if (idx >= 0 && is4)
                                 g_viewer3d.used_clut_is4bpp[idx] = true;
+                            if (idx >= 0 && !is4)
+                                g_viewer3d.used_clut_mask8[idx] = true;
                         }
                     }
 
@@ -2475,6 +2488,8 @@ static void on_entry_select(int sel_param)
                     g_viewer3d.n_used_cluts = 0;
                     memset(g_viewer3d.slice_map, -1, sizeof(g_viewer3d.slice_map));
                     memset(g_viewer3d.used_clut_is4bpp, 0, sizeof(g_viewer3d.used_clut_is4bpp));
+                    memset(g_viewer3d.used_clut_solid8, 0, sizeof(g_viewer3d.used_clut_solid8));
+                    memset(g_viewer3d.used_clut_mask8, 0, sizeof(g_viewer3d.used_clut_mask8));
                     if (mesh.tri_count > 0) {
                         int tp0 = (mesh.tris[0].tpage >> 7) & 3;
                         g_viewer3d.desired_bpp = (tp0 == 0) ? 4 : (tp0 == 2) ? 16 : 8;
@@ -2498,6 +2513,9 @@ static void on_entry_select(int sel_param)
                             }
                             if (idx >= 0 && is4)
                                 g_viewer3d.used_clut_is4bpp[idx] = true;
+                            if (idx >= 0 && !is4)
+                                (mesh.tris[fi].solid ? g_viewer3d.used_clut_solid8
+                                                     : g_viewer3d.used_clut_mask8)[idx] = true;
                         }
                     }
 
@@ -3245,6 +3263,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             a.vram_x = g_viewer3d.tex_vram_x; a.vram_y = g_viewer3d.tex_vram_y;
             a.clut_x = g_viewer3d.clut_base_x; a.clut_y = g_viewer3d.clut_base_y;
             a.slice_map = g_viewer3d.slice_map;
+            a.solid8_slice = g_viewer3d.solid8_slice;
             if (is_room) {
                 /* name the root node after the DAT file */
                 char name[64] = "DC1_Room";

@@ -336,6 +336,12 @@ struct ViewerPanel3D {
        used_clut_is4bpp[i] = true if at least one 4bpp face uses this CLUT. */
     u16     used_cluts[512];
     bool    used_clut_is4bpp[512];
+    /* An 8bpp face with / without MeshTri::solid uses this CLUT.  A row used
+       by both kinds gets a second 8bpp slice, solid8_slice[row] (-1 = none),
+       where texel 0x8000 stays opaque black; slot 0 is then the masked one. */
+    bool    used_clut_solid8[512];
+    bool    used_clut_mask8[512];
+    int     solid8_slice[16];
     int     n_used_cluts;
     bool    has_texture;
 
@@ -444,7 +450,7 @@ struct ViewerPanel3D {
                       im_flip_normals(true),
                       n_room_lights(0), use_room_lights(false),
                       pick_tri(-1), pick_section(0), pick_tpage(0), pick_clut(0), pick_group_count(0), gl_pick_id(0)
-                      { gl_renderer_name[0] = 0; room_ambient[0]=room_ambient[1]=room_ambient[2]=0; pick_info[0]=0; memset(slice_map, -1, sizeof(slice_map)); n_used_cluts=0; }
+                      { gl_renderer_name[0] = 0; room_ambient[0]=room_ambient[1]=room_ambient[2]=0; pick_info[0]=0; memset(slice_map, -1, sizeof(slice_map)); memset(solid8_slice, -1, sizeof(solid8_slice)); n_used_cluts=0; }
     ~ViewerPanel3D() { free(uv_tris); free(uv_verts); free(uv_tex_rgba); free(uv_atlas_rgba); free(sel_mask); free(im_verts); free(im_tris); }
 
     bool init_gl(HWND parent);

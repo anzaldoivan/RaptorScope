@@ -51,7 +51,7 @@ The tool reconstructs the PSX GPU rendering pipeline in software — including 4
 - **Game cameras (K key)**: **K** steps through the room's camera shots (**Shift+K** back). Each shot puts the view where the game puts its camera, with the game's field of view (H=320 on a 320x240 screen); the game's 4:3 frame is outlined with the area outside it dimmed, and the trigger zone that switches to the shot is outlined. Scrolling widens or narrows the view around the frame without moving the eye. Most rooms also keep a separate copy of their walls for each camera, and the camera's setup thread (script thread N for camera N) shows only its own copies with 0x48 03 <slot> <0/1>, so in a shot only that camera's sections are drawn, as in the game. Drawing every section at once, the default, shows details that differ between copies twice, such as ST10A's corkboard
 - **Walking through shots**: Each shot starts with a player marker in the middle of its trigger zone. **WASD** or the **arrow keys** walk it along the floor (**Shift** runs); shots that follow the player (fixed cameras that turn to watch her, cameras that slide along a corridor, side-on, orbiting and rail cameras) follow it as the game's camera handler would, and walking into another shot's trigger zone cuts to that shot. Dragging the view leaves the shot to orbit freely: the game camera is then drawn as its eye and view pyramid, which keeps following the player, and **J** goes back onto the shot. Shots that only shift the previous camera (types 10, 11, 19-21, 32, 33) have no position of their own; K still shows their sections
 - **Outdoor scenes**: Sky domes and sea planes out to ±32,000 units are kept; the camera frames the walkable area and the far clip plane reaches the sky
-- **PSX-accurate transparency**: 0x0000 masking, 0x8000 transparent black, STP semi-transparency for 4bpp decals (blood splatters)
+- **PSX-accurate transparency**: 0x0000 masking, 0x8000 transparent black on semi-transparent faces and opaque black on the others, STP semi-transparency for 4bpp decals (blood splatters)
 - **PSX vertex color modulation**: Room and door faces are Gouraud-shaded from their corner colours, scaled 2x to match hardware `(tex * vtx) / 128` behavior, so shading baked into a face shows as it does in game (ST108's wall box). Colours above 128, which brighten the texture on the PSX, stop at the texture's own colour
 - **Draw order inside a section**: The game draws some model slots (0x23 render mode 2 or 3) with no depth sorting inside the section: the first quad is drawn last, on top. Rooms rely on it for windows, signs and floor markings set a little behind the surface they show on, without a hole cut for them, such as ST101's restroom windows 22 units behind the wall. The viewer moves each such face 2 units in front of the face covering it, so it shows as it does in game. GLB, OBJ and SMD exports include the move
 
@@ -345,10 +345,14 @@ The tool implements the PSX GPU transparency pipeline:
 | BGR555 Value | STP Bit | Context | Alpha | Behavior |
 |---|---|---|---|---|
 | `0x0000` | 0 | Any | 0 | Pixel masked (not drawn) |
-| `0x8000` | 1 | Any | 0 | STP black = effectively transparent |
+| `0x8000` | 1 | 8bpp index 0, face with the semi-transparency bit | 0 | STP black = effectively transparent |
+| `0x8000` | 1 | 8bpp, face without the semi-transparency bit | 255 | Opaque black (ST305's cabinet door windows) |
+| `0x8000` | 1 | 4bpp decal sub-palette | 0 | STP black = effectively transparent |
 | STP=1 + color | 1 | 4bpp sub-palette | 128 | Semi-transparent decal (blood) |
 | STP=1 + color | 1 | 8bpp palette | 255 | Default VRAM state, NOT transparency |
 | STP=0 + color | 0 | Any | 255 | Fully opaque |
+
+A face is semi-transparent when bit 1 of its command byte is set (room quad record byte +39, triangle record byte +31). The viewer keeps that bit for the room faces the scripts place. When faces of both kinds use the same 8bpp CLUT row, the atlas holds the row twice: once with `0x8000` masked and once with it opaque.
 
 In a Dino Crisis 2 atlas, index 0 with `0x8000` is opaque black: its models are drawn opaque and use the index for dark texels.
 

@@ -74,7 +74,9 @@ static bool atlas_uv(const EmdExportAtlas* atlas,const MeshTri& tri,int c,f32& u
     int fppw=tp==0?4:tp==2?1:2, slice=0;
     if(at.slices>1){int row=((tri.clut>>6)&511)-at.clut_y; if(row<0)row=0;if(row>15)row=15;
         int slot=0; if(tp==0){int rel=((tri.clut&63)*16-at.clut_x)/16;if(rel<0)rel=0;if(rel>63)rel=63;slot=rel+1;}
-        slice=at.slice_map[row*65+slot];if(slice<0)slice=at.slice_map[row*65];if(slice<0)slice=0;
+        slice=at.slice_map[row*65+slot];if(slice<0)slice=at.slice_map[row*65];
+        if(tp!=0&&tri.solid&&at.solid8_slice&&at.solid8_slice[row]>=0)slice=at.solid8_slice[row];
+        if(slice<0)slice=0;
     }
     if(slice>=at.slices)return false;
     u=(((tri.tpage&15)*64-at.vram_x)*ppw+(f32)tri.uv[c][0]*ppw/fppw)/at.width;

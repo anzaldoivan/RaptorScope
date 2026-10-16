@@ -705,6 +705,7 @@ void mesh_apply_xforms(Mesh& mesh, const u8* dec, size_t dec_size, u32 base,
                 }
                 u16 tp = rd_u16(dec + o + 32);
                 u16 cl = rd_u16(dec + o + 34);
+                u8 solid = !(dec[o + 39] & 2);  /* command byte: bit 1 = semi-transparent */
                 u8 cols[4][3];
                 for (int ci = 0; ci < 4; ci++) {
                     cols[ci][0] = dec[o+36+ci*4]; cols[ci][1] = dec[o+36+ci*4+1]; cols[ci][2] = dec[o+36+ci*4+2];
@@ -729,7 +730,7 @@ void mesh_apply_xforms(Mesh& mesh, const u8* dec, size_t dec_size, u32 base,
                 }
                 MeshTri t1 = {};
                 t1.idx[0]=bi; t1.idx[1]=bi+2; t1.idx[2]=bi+1;
-                t1.color=c; t1.tpage=tp; t1.clut=cl;
+                t1.color=c; t1.tpage=tp; t1.clut=cl; t1.solid=solid;
                 set_vcols(t1, cols, 0, 2, 1);
                 t1.uv[0][0]=uvs[0][0]; t1.uv[0][1]=uvs[0][1];
                 t1.uv[1][0]=uvs[2][0]; t1.uv[1][1]=uvs[2][1];
@@ -738,7 +739,7 @@ void mesh_apply_xforms(Mesh& mesh, const u8* dec, size_t dec_size, u32 base,
                 new_tris.push(t1);
                 MeshTri t2 = {};
                 t2.idx[0]=bi+1; t2.idx[1]=bi+2; t2.idx[2]=bi+3;
-                t2.color=c; t2.tpage=tp; t2.clut=cl;
+                t2.color=c; t2.tpage=tp; t2.clut=cl; t2.solid=solid;
                 set_vcols(t2, cols, 1, 2, 3);
                 t2.uv[0][0]=uvs[1][0]; t2.uv[0][1]=uvs[1][1];
                 t2.uv[1][0]=uvs[2][0]; t2.uv[1][1]=uvs[2][1];
@@ -762,6 +763,7 @@ void mesh_apply_xforms(Mesh& mesh, const u8* dec, size_t dec_size, u32 base,
                 }
                 u16 tp = rd_u16(dec + o + 24);
                 u16 cl = rd_u16(dec + o + 26);
+                u8 solid = !(dec[o + 31] & 2);
                 u8 cols[3][3];
                 for (int ci = 0; ci < 3; ci++) {
                     cols[ci][0] = dec[o+28+ci*4]; cols[ci][1] = dec[o+28+ci*4+1]; cols[ci][2] = dec[o+28+ci*4+2];
@@ -787,7 +789,7 @@ void mesh_apply_xforms(Mesh& mesh, const u8* dec, size_t dec_size, u32 base,
                 t.idx[0] = bi; t.idx[1] = bi+2; t.idx[2] = bi+1;
                 t.color = avg_colors(cols, 3);
                 set_vcols(t, cols, 0, 2, 1);
-                t.tpage = tp; t.clut = cl;
+                t.tpage = tp; t.clut = cl; t.solid = solid;
                 t.uv[0][0]=uvs[0][0]; t.uv[0][1]=uvs[0][1];
                 t.uv[1][0]=uvs[2][0]; t.uv[1][1]=uvs[2][1];
                 t.uv[2][0]=uvs[1][0]; t.uv[2][1]=uvs[1][1];

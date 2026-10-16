@@ -837,11 +837,12 @@ static void make_palette(Buffer& out, int n, u16 seed)
 static u16 clut_at(int x, int y) { return (u16)((y << 6) | (x / 16)); }
 
 /* The atlas pixel a face with this tpage and clut reads for texel (u, v) */
-static const u8* atlas_texel(const TexAtlasLayout& a, const u8* rgba, u16 tpage, u16 clut, int u, int v)
+static const u8* atlas_texel(const TexAtlasLayout& a, const u8* rgba, u16 tpage, u16 clut, int u, int v,
+                            bool solid = false)
 {
     u8 uv[3][2] = { { (u8)u, (u8)v }, { (u8)u, (u8)v }, { (u8)u, (u8)v } };
     float st[3][2];
-    atlas_face_uv(a, tpage, clut, uv, st);
+    atlas_face_uv(a, tpage, clut, uv, st, solid);
     int x = (int)(st[0][0] * a.w), y = (int)(st[0][1] * a.h);
     if (x < 0 || x >= a.w || y < 0 || y >= a.h) return 0;
     return rgba + ((size_t)y * a.w + x) * 4;
@@ -892,6 +893,34 @@ static void test_atlas()
         free(rgba);
         CHECK(build_texture_atlas(ar, two, four, 2, 512, lay, &rgba) == 1 && lay.num_slices == 1 && lay.h == 512);
         CHECK(atlas_face_slice(lay, 0x001E, two[1]) == 0);
+        free(rgba);
+    }
+
+    /* DC1: index 0 holding 0x8000 is a hole on semi-transparent faces and
+       opaque black on solid ones (MeshTri::solid).  A CLUT row both kinds
+       use gets a second 8bpp slice; a row only solid faces use keeps it in
+       slot 0.  DC2 passes no flags and keeps one slice. */
+    {
+        Buffer zero; zero.resize(64 * 2 * 32); memset(zero.data, 0, zero.size);
+        Buffer pal; make_palette(pal, 256, 100); pal.data[0] = 0x00; pal.data[1] = 0x80;
+        PkgEntry e[] = { { 1, zero.data, (u32)zero.size, 896, 256, 64, 32 },
+                         { 2, pal.data, 512, 0, 511, 256, 1 } };
+        Buffer pkg; make_package(pkg, e, 2, false);
+        DatArchive ar; CHECK(dat_parse_memory(pkg.data, pkg.size, ar));
+        u16 cl = clut_at(0, 511);
+        bool yes = true, no = false;
+        CHECK(build_texture_atlas(ar, &cl, is4, 1, 16384, lay, &rgba, &yes, &yes) == 1);
+        CHECK(lay.num_slices == 2 && lay.solid8_slice[0] == 1);
+        CHECK(atlas_face_slice(lay, SKIN, cl, false) == 0 && atlas_face_slice(lay, SKIN, cl, true) == 1);
+        CHECK(atlas_texel(lay, rgba, SKIN, cl, 3, 3)[3] == 0);
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, 3, 3, true), 0x8000));
+        free(rgba);
+        CHECK(build_texture_atlas(ar, &cl, is4, 1, 16384, lay, &rgba, &yes, &no) == 1);
+        CHECK(lay.num_slices == 1 && lay.solid8_slice[0] == -1);
+        CHECK(is_colour(atlas_texel(lay, rgba, SKIN, cl, 3, 3, true), 0x8000));
+        free(rgba);
+        CHECK(build_texture_atlas(ar, &cl, is4, 1, 16384, lay, &rgba) == 1);
+        CHECK(lay.num_slices == 1 && atlas_texel(lay, rgba, SKIN, cl, 3, 3)[3] == 0);
         free(rgba);
     }
 

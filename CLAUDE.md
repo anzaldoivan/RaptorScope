@@ -184,7 +184,7 @@ Ordered with memory safety and data loss first.
 - **B17** **Blend modes are approximated wrongly.** `ViewerPanel3D::render` draws ABR 3 (B+F/4) with the same full-additive blend as ABR 1, and ABR 2 (B−F) as a multiply. The comments say quarter-additive and subtractive.
 - **B18** **Blending decided from ABR alone (verify).**
   - The viewer (`build_mesh_lists`) and room GLB export (`export_room_glb`) treat ABR 0 as always opaque and ABR 1–3 as always blended.
-  - On the PSX, a polygon is only semi-transparent if its command byte also has the semi-transparency bit; for room triangles that is byte +31, which `parse_rdt_layout` reads but no parser keeps.
+  - On the PSX, a polygon is only semi-transparent if its command byte also has the semi-transparency bit (quad record byte +39, triangle record byte +31). `mesh_apply_xforms` now keeps it as `MeshTri::solid`, but only the atlas uses it, to decide whether texel `0x8000` is a hole or opaque black. Blending still comes from ABR.
   - ABR 0 is the 50/50 blend mode, so semi-transparent ABR 0 faces are drawn opaque.
   - A semi-transparent polygon blends only the texels whose STP bit is set and draws the rest opaque. ST108's lit wall plate (slot 2, face 7) is ABR 1 on a palette with no STP entries, so the viewer adds it to the scene where the game should draw it solid.
 - **B19** **Character GLBs come out tinted.** `export_emd_glb` writes the per-part debug colours (`pcols` from `parse_emd_model_dec`) as `COLOR_0`, and glTF multiplies `COLOR_0` into the base colour. Room GLBs double `avg_colors`, which is already ×1.6, so they mostly saturate.
@@ -246,6 +246,10 @@ Ordered with memory safety and data loss first.
 - **B50** **DC2 camera roll sign rests on one picture (verify).** 36 of 1169 cameras have a roll, in ST000, ST10E, ST200, ST400, ST504, ST808 and ST903; the large ones (ST504 camera 5, ST903 cameras 19 and 20, ST200 camera 15, ST400 cameras 21 and 29) are cameras no zone names. Projected offline with `dc2_camera_project`, the floor line of ST504's camera 5 slopes with the painted floor, and against it with the sign flipped. `ViewerPanel3D::update_shot` is written to turn the same way but was never run: in the viewer, K to camera 5 of `ST504.DAT` should show the overlay tilted with the picture, not against it.
 - **B51** **DC2 camera switching while walking is approximate.** `shot_zone_at` takes the first zone in order whose quad holds the player and that is not switched off, within 1500 units of the zone's height; the game tests the player's floor against [floor, floor + span], and the script can force a camera (op 0x4A), which the viewer does not follow. The second quad of a zone (+28) is read and not drawn. The player cannot be kept on the ground, since there is no mesh.
 - **B52** **Bytes after the last package of a DC2 file are dropped on Save As.** `dat_parse_memory` stops at the first sector that is not a package header, and `dat_build` writes packages only. No file of the game has such bytes (all 89 `.DBS` tile exactly), so this matters only for a damaged or foreign file.
+- **B53** **`0x8000` texels outside placed room faces, and on ABR 0 (verify).**
+  - Only `mesh_apply_xforms` sets `MeshTri::solid`. Characters, doors and the fallback room parsers leave it at 0, so index 0 of an 8-bit palette that holds `0x8000` is still a hole on all their faces.
+  - A semi-transparent ABR 0 face should show `0x8000` as the background at half brightness. The viewer discards the texel instead. For ABR 1 to 3 the hole is correct, because black adds or subtracts nothing.
+  - The solid slice of a CLUT row used by both kinds of face is allocated last. When the atlas reaches `GL_MAX_TEXTURE_SIZE` it is dropped and those faces use the masked slice. At a 16384 limit this leaves 1,231 faces in st600, st609, st900 and stC00 with holes.
 
 ### Contradictions (code vs README, comments or other code)
 

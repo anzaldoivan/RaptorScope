@@ -120,24 +120,30 @@ struct TexAtlasLayout {
     int num_pal_rows;          /* CLUT rows the palettes span (at most 16) */
     int num_slices;            /* slices stacked in the atlas */
     int slice_map[16 * 65];
+    /* Per CLUT row, the slice for 8bpp faces flagged MeshTri::solid when
+       the row also has masked 8bpp faces (-1 = none: they use slot 0).
+       In it texel 0x8000 at index 0 stays opaque black. */
+    int solid8_slice[16];
 };
 
 /* Compose the atlas for the faces that use the given CLUTs (clut fields
    as stored in a face; used_is4bpp[i] is set when a 4bpp face uses
-   used_cluts[i]).  max_h caps the atlas height; slices beyond it are
+   used_cluts[i]; used_solid8[i] / used_mask8[i] when an 8bpp face with /
+   without MeshTri::solid uses it, either may be null).  max_h caps the atlas height; slices beyond it are
    dropped from the map.  *out_rgba is malloc'd (caller frees).
    Returns 1 when built, 0 when the archive has no texture, -1 when there
    is nothing to build (an item bank, or no memory). */
 int build_texture_atlas(const DatArchive& archive,
                         const u16* used_cluts, const bool* used_is4bpp, int n_used,
-                        int max_h, TexAtlasLayout& layout, u8** out_rgba);
+                        int max_h, TexAtlasLayout& layout, u8** out_rgba,
+                        const bool* used_solid8 = 0, const bool* used_mask8 = 0);
 
 /* The slice a face with this tpage and clut samples. */
-int atlas_face_slice(const TexAtlasLayout& a, u16 tpage, u16 clut);
+int atlas_face_slice(const TexAtlasLayout& a, u16 tpage, u16 clut, bool solid = false);
 
 /* Atlas coordinates (0..1) of a face's three corners, at texel centres. */
 void atlas_face_uv(const TexAtlasLayout& a, u16 tpage, u16 clut,
-                   const u8 uv[3][2], float out[3][2]);
+                   const u8 uv[3][2], float out[3][2], bool solid = false);
 
 /*─── Background extraction (LZSS0 compressed) ──────────────────*/
 

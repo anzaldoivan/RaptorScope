@@ -19,6 +19,7 @@ struct MeshTri {
     u8   alt;          /* 1 = conditional variant geometry (SCD branch) */
     u8   slot;         /* room model slot the section is placed in (0x23) */
     u8   gouraud;      /* 1 = vcol holds the face's corner colours */
+    u8   solid;        /* 1 = command byte has no semi-transparency bit: texel 0x8000 is opaque black */
     u8   vcol[3][3];   /* RGB per corner as stored (128 = texture as is), in uv order */
     u32  src_off;      /* section header offset in RDT (0=unknown), for object picking */
 };
@@ -287,6 +288,7 @@ struct EmdExportAtlas {
     const u8* rgba;
     int width, height, slices, bpp, vram_x, vram_y, clut_x, clut_y;
     const int* slice_map;
+    const int* solid8_slice;  /* per CLUT row, slice for 8bpp faces flagged solid (-1 = slot 0); may be null */
 };
 bool export_emd_glb(const char* path, const EmdModel& model,
                     const EmdExportAtlas* atlas = 0, f32 fps = 30.0f);

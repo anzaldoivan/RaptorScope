@@ -2137,6 +2137,7 @@ static void atlas_layout(TexAtlasLayout& a, int tex_w, int tex_h, u16 tex_vram_x
     a.num_pal_rows = g_viewer3d.num_pal_rows;
     a.num_slices = num_sub_pals;
     memcpy(a.slice_map, g_viewer3d.slice_map, sizeof(a.slice_map));
+    memcpy(a.solid8_slice, g_viewer3d.solid8_slice, sizeof(a.solid8_slice));
 }
 
 /* Marks the faces whose texture has see-through texels (alpha 0, which the
@@ -2165,7 +2166,7 @@ static void mark_see_through(const Mesh& mesh, u8* out, const u8* atlas,
         int tp = (t.tpage >> 7) & 3;
         int face_ppw = (tp == 0) ? 4 : (tp == 2) ? 1 : 2;
         int x0 = ((t.tpage & 0xF) * 64 - (int)tex_vram_x) * tex_ppw;
-        int y0 = atlas_face_slice(lay, t.tpage, t.clut) * single_h
+        int y0 = atlas_face_slice(lay, t.tpage, t.clut, t.solid) * single_h
                + ((t.tpage >> 4) & 1) * 256 - (int)tex_vram_y;
 
         /* Texel centres inside the triangle in UV space */
@@ -2281,7 +2282,7 @@ static void build_solid_list(int list_id, const Mesh& mesh,
 
         /* Atlas coordinates of the corners' texel centres */
         float tc[3][2];
-        atlas_face_uv(lay, t.tpage, t.clut, t.uv, tc);
+        atlas_face_uv(lay, t.tpage, t.clut, t.uv, tc, t.solid);
         for (int vi = 0; vi < 3; vi++) {
             glTexCoord2f(tc[vi][0], tc[vi][1]);
             if (gouraud) {
