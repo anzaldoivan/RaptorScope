@@ -234,4 +234,13 @@ bool dc2_parse_model(const u8* dec, size_t dec_size, u32 base, EmdModel& model);
 bool dc2_model_texture(const DatArchive& archive, u16 tpage, u16 clut,
                        int& tex_entry, int& pal_entry);
 
+/* The alternate-skin file of a player package with no skin of its own:
+   "WP<c><n>A.DAT" for "WEP_P<c>0<n>.DAT" (WP00A.DAT for WEP_P000.DAT).
+   WEP_P000.DAT and WEP_P100.DAT hold the model and the weapon's texture
+   but not the skin page at (896, 0); WEP_P001.DAT and up carry it.  The
+   game loads WP<n>A only when a flag is set (loader 0x482420, gate
+   0x482631), so it is a stand-in: which file gives the default skin is
+   not known.  False when the name is not of that form. */
+bool dc2_alt_skin_name(const char* package_name, char out[16]);
+
 #endif /* DC_FORMATS_DC2_H */

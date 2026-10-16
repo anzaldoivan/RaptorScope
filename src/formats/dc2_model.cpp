@@ -248,3 +248,16 @@ bool dc2_model_texture(const DatArchive& archive, u16 tpage, u16 clut,
     int depth = (tpage >> 7) & 3;   /* 0 = 4bpp, 1 = 8bpp, 2 = 16bpp */
     return tex_entry >= 0 && (depth == 2 || pal_entry >= 0);
 }
+
+bool dc2_alt_skin_name(const char* name, char out[16])
+{
+    static const char prefix[] = "WEP_P";
+    for (int i = 0; i < 5; i++)
+        if ((name[i] >= 'a' && name[i] <= 'z' ? name[i] - 32 : name[i]) != prefix[i]) return false;
+    if (name[5] < '0' || name[5] > '9' || name[6] != '0' ||
+        name[7] < '0' || name[7] > '9' || name[8] != '.')
+        return false;
+    out[0] = 'W'; out[1] = 'P'; out[2] = name[5]; out[3] = name[7];
+    memcpy(out + 4, "A.DAT", 6);
+    return true;
+}

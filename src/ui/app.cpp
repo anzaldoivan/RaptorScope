@@ -62,8 +62,11 @@ static HWND   g_panels[PANEL_COUNT];
 static EmdModel* g_emd_model = 0;
 
 /* Dino Crisis 2: the .TEX package beside the open one (E00.TEX for
-   E00.DAT), which holds an enemy model's texture.  Loaded on first use. */
+   E00.DAT), which holds an enemy model's texture.  Loaded on first use.
+   g_dc2_skin_alt: it is a player's alternate-skin file instead, standing
+   in for a skin the package lacks (dc2_alt_skin_name). */
 static DatArchive* g_dc2_skin = 0;
+static bool        g_dc2_skin_alt = false;
 
 /* EMD header offsets discovered during tree building (for multi-EMD entries) */
 #define MAX_EMDS_PER_ENTRY 16
@@ -1900,8 +1903,9 @@ static void dc2_show_hex(const u8* data, size_t size)
 }
 
 /* The archive holding the texture a model's header names: the open
-   package, or else the .TEX of the same name next to it.  0 when neither
-   has it (player models: WEP_P000.DAT's own texture is the weapon's). */
+   package, or else the .TEX of the same name next to it, or else, for
+   WEP_P000.DAT and WEP_P100.DAT, the player's alternate-skin file as a
+   stand-in (alternate skin).  0 when none has it. */
 static DatArchive* dc2_texture_source(u16 tpage, u16 clut)
 {
     int tex, pal;
@@ -1914,6 +1918,16 @@ static DatArchive* dc2_texture_source(u16 tpage, u16 clut)
         if (dot && strlen(dot) == 4) {
             memcpy(dot, ".TEX", 4);
             g_dc2_skin = new DatArchive();
+            g_dc2_skin_alt = false;
+            if (!dat_parse_file(path, *g_dc2_skin)) { delete g_dc2_skin; g_dc2_skin = 0; }
+        }
+        char* base = path + strlen(path);
+        while (base > path && base[-1] != '\\' && base[-1] != '/') base--;
+        char alt[16];
+        if (!g_dc2_skin && dc2_alt_skin_name(base, alt) && (base - path) + strlen(alt) < MAX_PATH) {
+            strcpy(base, alt);
+            g_dc2_skin = new DatArchive();
+            g_dc2_skin_alt = true;
             if (!dat_parse_file(path, *g_dc2_skin)) { delete g_dc2_skin; g_dc2_skin = 0; }
         }
     }
@@ -1960,7 +1974,8 @@ static bool dc2_show_model(int idx, const DatEntry& e, const u8* dd, size_t ds)
     char buf[256];
     _snprintf(buf, 255, "Entry %d: DC2 Model  -  %d verts, %d faces, %d bones  |  texture: %s  (bind pose; DC2 animation is not decoded)",
               idx, em.vert_count, em.tri_count, g_emd_model->skeleton.bone_count,
-              !src ? "not found" : src == g_dc2_skin ? "from the .TEX file" : "this package");
+              !src ? "not found" : src != g_dc2_skin ? "this package" :
+              g_dc2_skin_alt ? "stand-in (alternate skin file)" : "from the .TEX file");
     g_app.set_status(buf);
     g_app.switch_panel(PANEL_3D);
     return true;
