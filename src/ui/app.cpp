@@ -1611,13 +1611,65 @@ static void layout_main(HWND hwnd)
  *  the archive's textures and the CLUTs the mesh's faces use, and
  *  upload it.
  *═══════════════════════════════════════════════════════════════════*/
-/* src: the archive to take textures and palettes from, when it is not
+/* The part of the atlas the UV editor shows: the texture pages the mesh's
+   faces sample, and the CLUT row of its first face.  atlas_w is the
+   atlas width in pixels.  set_texture cuts the editor's image by these,
+   so they are set before it. */
+static void set_uv_crop(const Mesh& mesh, int atlas_w)
+{
+    if (mesh.tri_count <= 0) {
+        g_viewer3d.uv_crop_px_x = 0;
+        g_viewer3d.uv_crop_px_w = 0;
+        g_viewer3d.uv_crop_py_y = 0;
+        g_viewer3d.uv_crop_py_h = 0;
+        g_viewer3d.uv_tex_vram_x = g_viewer3d.tex_vram_x;
+        g_viewer3d.uv_tex_vram_y = g_viewer3d.tex_vram_y;
+        return;
+    }
+    int tex_ppw = (g_viewer3d.tex_bpp == 4) ? 4 : (g_viewer3d.tex_bpp == 16) ? 1 : 2;
+    int min_px = 0x7FFFFFFF, max_px = 0;
+    int min_vy = 512, max_vy_end = 0;
+    for (int fi = 0; fi < mesh.tri_count; fi++) {
+        int tx = mesh.tris[fi].tpage & 0xF;
+        int ty = (mesh.tris[fi].tpage >> 4) & 1;
+        int tp = (mesh.tris[fi].tpage >> 7) & 3;
+        int face_ppw = (tp == 0) ? 4 : (tp == 2) ? 1 : 2;
+        int px_start = (tx * 64 - (int)g_viewer3d.tex_vram_x) * tex_ppw;
+        int page_pw = 256 * tex_ppw / face_ppw;
+        int px_end = px_start + page_pw;
+        if (px_start < min_px) min_px = px_start;
+        if (px_end > max_px) max_px = px_end;
+        int vy = ty * 256;
+        if (vy < min_vy) min_vy = vy;
+        if (vy + 256 > max_vy_end) max_vy_end = vy + 256;
+    }
+    if (min_px < 0) min_px = 0;
+    if (max_px > atlas_w) max_px = atlas_w;
+
+    g_viewer3d.uv_crop_px_x = min_px;
+    g_viewer3d.uv_crop_px_w = max_px > min_px ? max_px - min_px : 0;
+    g_viewer3d.uv_crop_py_y = min_vy;
+    g_viewer3d.uv_crop_py_h = max_vy_end - min_vy;
+    g_viewer3d.uv_tex_vram_x = (u16)((int)g_viewer3d.tex_vram_x + min_px / tex_ppw);
+    g_viewer3d.uv_tex_vram_y = 0;  /* full slice: UVs use absolute VRAM Y */
+
+    int cy = (mesh.tris[0].clut >> 6) & 0x1FF;
+    int row = cy - g_viewer3d.clut_base_y;
+    if (row >= g_viewer3d.num_pal_rows) row = g_viewer3d.num_pal_rows - 1;
+    if (row < 0) row = 0;
+    g_viewer3d.uv_cache_clut_row = row;
+}
+
+/* Build the atlas for the CLUTs in g_viewer3d.used_cluts and take over
+   its layout.  Returns the image to upload (caller frees), or 0 when the
+   viewer's texture stands as it is or was cleared.
+   src: the archive to take textures and palettes from, when it is not
    the open one (a Dino Crisis 2 enemy's .TEX).  force rebuilds the atlas
    even when the cache below thinks it has this archive (B13). */
-static void upload_archive_texture(DatArchive* src = 0, bool force = false)
+static u8* build_archive_atlas(DatArchive* src, bool force, TexAtlasLayout& lay)
 {
     if (!src) src = g_app.archive;
-    if (!src) return;
+    if (!src) return 0;
     DatArchive& ar = *src;
 
     /* ── Atlas cache: skip full rebuild if archive+sub-pal config unchanged ── */
@@ -1627,7 +1679,7 @@ static void upload_archive_texture(DatArchive* src = 0, bool force = false)
     bool same_cluts = (g_viewer3d.n_used_cluts == s_cached_n_cluts &&
                        memcmp(s_cached_cluts, g_viewer3d.used_cluts, g_viewer3d.n_used_cluts * 2) == 0);
     if (!force && &ar == s_cached_archive && same_cluts && g_viewer3d.tex_w > 0)
-        return;
+        return 0;
     s_cached_archive = &ar;
     s_cached_n_cluts = g_viewer3d.n_used_cluts;
     memcpy(s_cached_cluts, g_viewer3d.used_cluts, g_viewer3d.n_used_cluts * 2);
@@ -1641,16 +1693,15 @@ static void upload_archive_texture(DatArchive* src = 0, bool force = false)
     }
     if (gl_max < 1024) gl_max = 16384;
 
-    TexAtlasLayout lay;
     u8* rgba = 0;
     int built = build_texture_atlas(ar, g_viewer3d.used_cluts, g_viewer3d.used_clut_is4bpp,
                                     g_viewer3d.n_used_cluts, gl_max, lay, &rgba);
     if (built == 0) {
         /* No valid texture in this archive — clear any stale texture from previous file */
         g_viewer3d.clear_texture();
-        return;
+        return 0;
     }
-    if (built < 0) return;
+    if (built < 0) return 0;
 
     g_viewer3d.tex_bpp = lay.bpp;
     g_viewer3d.tex_vram_x = (u16)lay.vram_x;
@@ -1660,9 +1711,16 @@ static void upload_archive_texture(DatArchive* src = 0, bool force = false)
     g_viewer3d.num_sub_pals = lay.num_slices;
     g_viewer3d.clut_base_x = lay.clut_base_x;
     memcpy(g_viewer3d.slice_map, lay.slice_map, sizeof(g_viewer3d.slice_map));
+    return rgba;
+}
 
-    g_viewer3d.set_texture(rgba, lay.w, lay.h);
-
+/* Texture the 3D viewer for a mesh whose CLUTs are in g_viewer3d.used_cluts */
+static void upload_archive_texture(const Mesh& mesh, DatArchive* src = 0, bool force = false)
+{
+    TexAtlasLayout lay;
+    u8* rgba = build_archive_atlas(src, force, lay);
+    set_uv_crop(mesh, rgba ? lay.w : g_viewer3d.tex_w);
+    if (rgba) g_viewer3d.set_texture(rgba, lay.w, lay.h);
     free(rgba);
 }
 
@@ -1893,28 +1951,9 @@ static bool dc2_show_model(int idx, const DatEntry& e, const u8* dd, size_t ds)
        and a closed archive's address is soon reused, so the atlas cache
        cannot tell E00's skin from E40's: always rebuild. */
     DatArchive* src = dc2_texture_source(tpage, clut);
-    if (src) upload_archive_texture(src, true);
-    else     g_viewer3d.clear_texture();
+    if (src) upload_archive_texture(em, src, true);
+    else   { g_viewer3d.clear_texture(); set_uv_crop(em, 0); }
 
-    /* UV editor crop: the one texture page the model samples */
-    {
-        int tex_ppw = (g_viewer3d.tex_bpp == 4) ? 4 : (g_viewer3d.tex_bpp == 16) ? 1 : 2;
-        int face_ppw = (depth == 0) ? 4 : (depth == 2) ? 1 : 2;
-        int min_px = ((tpage & 0xF) * 64 - (int)g_viewer3d.tex_vram_x) * tex_ppw;
-        int max_px = min_px + 256 * tex_ppw / face_ppw;
-        if (min_px < 0) min_px = 0;
-        if (max_px > g_viewer3d.tex_w) max_px = g_viewer3d.tex_w;
-        g_viewer3d.uv_crop_px_x = min_px;
-        g_viewer3d.uv_crop_px_w = max_px > min_px ? max_px - min_px : 0;
-        g_viewer3d.uv_crop_py_y = ((tpage >> 4) & 1) * 256;
-        g_viewer3d.uv_crop_py_h = 256;
-        g_viewer3d.uv_tex_vram_x = (u16)((int)g_viewer3d.tex_vram_x + min_px / tex_ppw);
-        g_viewer3d.uv_tex_vram_y = 0;
-        int row = ((clut >> 6) & 0x1FF) - g_viewer3d.clut_base_y;
-        if (row >= g_viewer3d.num_pal_rows) row = g_viewer3d.num_pal_rows - 1;
-        if (row < 0) row = 0;
-        g_viewer3d.uv_cache_clut_row = row;
-    }
     g_viewer3d.set_emd(*g_emd_model);
     g_viewer3d.set_emd_anim(g_emd_model);
 
@@ -2184,45 +2223,8 @@ static void on_entry_select(int sel_param)
                     }
 
                     /* Upload atlas (cached — only rebuilds if archive/bpp changed) */
-                    upload_archive_texture();
+                    upload_archive_texture(g_emd_model->mesh);
 
-                    /* Compute UV editor crop from EMD's tpage range and CLUT */
-                    if (g_emd_model->mesh.tri_count > 0) {
-                        const Mesh& em = g_emd_model->mesh;
-                        int tex_ppw = (g_viewer3d.tex_bpp == 4) ? 4 : (g_viewer3d.tex_bpp == 16) ? 1 : 2;
-
-                        int min_px = 0x7FFFFFFF, max_px = 0;
-                        int min_vy = 512, max_vy_end = 0;
-                        for (int fi = 0; fi < em.tri_count; fi++) {
-                            int tx = em.tris[fi].tpage & 0xF;
-                            int ty = (em.tris[fi].tpage >> 4) & 1;
-                            int px_start = (tx * 64 - (int)g_viewer3d.tex_vram_x) * tex_ppw;
-                            int tp = (em.tris[fi].tpage >> 7) & 3;
-                            int face_ppw = (tp == 0) ? 4 : (tp == 2) ? 1 : 2;
-                            int page_pw = 256 * tex_ppw / face_ppw;
-                            int px_end = px_start + page_pw;
-                            if (px_start < min_px) min_px = px_start;
-                            if (px_end > max_px) max_px = px_end;
-                            int vy = ty * 256;
-                            if (vy < min_vy) min_vy = vy;
-                            if (vy + 256 > max_vy_end) max_vy_end = vy + 256;
-                        }
-                        if (min_px < 0) min_px = 0;
-                        if (max_px > g_viewer3d.tex_w) max_px = g_viewer3d.tex_w;
-
-                        g_viewer3d.uv_crop_px_x = min_px;
-                        g_viewer3d.uv_crop_px_w = max_px - min_px;
-                        g_viewer3d.uv_crop_py_y = min_vy;
-                        g_viewer3d.uv_crop_py_h = max_vy_end - min_vy;
-                        g_viewer3d.uv_tex_vram_x = (u16)((int)g_viewer3d.tex_vram_x + min_px / tex_ppw);
-                        g_viewer3d.uv_tex_vram_y = 0;  /* full slice: UVs use absolute VRAM Y */
-
-                        int cy = (em.tris[0].clut >> 6) & 0x1FF;
-                        int row = cy - g_viewer3d.clut_base_y;
-                        if (row < 0) row = 0;
-                        if (row >= g_viewer3d.num_pal_rows) row = g_viewer3d.num_pal_rows - 1;
-                        g_viewer3d.uv_cache_clut_row = row;
-                    }
                     g_viewer3d.set_emd(*g_emd_model);
                     g_viewer3d.set_emd_anim(g_emd_model);
                     char buf[256];
@@ -2282,50 +2284,8 @@ static void on_entry_select(int sel_param)
                     }
 
                     /* Upload atlas (cached) */
-                    upload_archive_texture();
+                    upload_archive_texture(mesh);
 
-                    /* Compute UV editor crop from mesh tpage range */
-                    if (mesh.tri_count > 0) {
-                        int tex_ppw = (g_viewer3d.tex_bpp == 4) ? 4 : (g_viewer3d.tex_bpp == 16) ? 1 : 2;
-                        int min_px = 0x7FFFFFFF, max_px = 0;
-                        int min_vy = 512, max_vy_end = 0;
-                        for (int fi = 0; fi < mesh.tri_count; fi++) {
-                            int tx = mesh.tris[fi].tpage & 0xF;
-                            int ty = (mesh.tris[fi].tpage >> 4) & 1;
-                            int tp = (mesh.tris[fi].tpage >> 7) & 3;
-                            int face_ppw = (tp == 0) ? 4 : (tp == 2) ? 1 : 2;
-                            int px_start = (tx * 64 - (int)g_viewer3d.tex_vram_x) * tex_ppw;
-                            int page_pw = 256 * tex_ppw / face_ppw;
-                            int px_end = px_start + page_pw;
-                            if (px_start < min_px) min_px = px_start;
-                            if (px_end > max_px) max_px = px_end;
-                            int vy = ty * 256;
-                            if (vy < min_vy) min_vy = vy;
-                            if (vy + 256 > max_vy_end) max_vy_end = vy + 256;
-                        }
-                        if (min_px < 0) min_px = 0;
-                        if (max_px > g_viewer3d.tex_w) max_px = g_viewer3d.tex_w;
-
-                        g_viewer3d.uv_crop_px_x = min_px;
-                        g_viewer3d.uv_crop_px_w = max_px - min_px;
-                        g_viewer3d.uv_crop_py_y = min_vy;
-                        g_viewer3d.uv_crop_py_h = max_vy_end - min_vy;
-                        g_viewer3d.uv_tex_vram_x = (u16)((int)g_viewer3d.tex_vram_x + min_px / tex_ppw);
-                        g_viewer3d.uv_tex_vram_y = 0;  /* full slice: UVs use absolute VRAM Y */
-
-                        int cy = (mesh.tris[0].clut >> 6) & 0x1FF;
-                        int row = cy - g_viewer3d.clut_base_y;
-                        if (row < 0) row = 0;
-                        if (row >= g_viewer3d.num_pal_rows) row = g_viewer3d.num_pal_rows - 1;
-                        g_viewer3d.uv_cache_clut_row = row;
-                    } else {
-                        g_viewer3d.uv_crop_px_x = 0;
-                        g_viewer3d.uv_crop_px_w = 0;
-                        g_viewer3d.uv_crop_py_y = 0;
-                        g_viewer3d.uv_crop_py_h = 0;
-                        g_viewer3d.uv_tex_vram_x = g_viewer3d.tex_vram_x;
-                        g_viewer3d.uv_tex_vram_y = g_viewer3d.tex_vram_y;
-                    }
                     /* Apply xform instancing using already-parsed overlay */
                     /* (already done above, before max_sub_pal) */
 
