@@ -3,6 +3,7 @@
  *  Dino Crisis (PC) bytecode disassembly.
  */
 #include "formats/scd.h"
+#include "formats/mesh.h"
 #include "core/types.h"
 #include <stdio.h>
 #include <string.h>
@@ -30,6 +31,9 @@ static void fmt_operands(char* buf, size_t bufsz, u8 op, const u8* data, int len
 
     /* Special formatting for known opcodes */
     switch (op) {
+    case 0x01: /* TASK_START: s8 task (-1 = allocate), s16 sub; handler 0x4A3103 */
+        _snprintf(buf, bufsz, "task=%d, sub=%d", (s8)data[1], rs16(data + 2));
+        return;
     case 0x02: /* EVT_NEXT */
         _snprintf(buf, bufsz, "frames=%d", rs16(data + 2));
         return;
@@ -89,23 +93,13 @@ static void fmt_operands(char* buf, size_t bufsz, u8 op, const u8* data, int len
     }
     case 0x28: { /* ZONE_DEF */
         u8 slot = data[1];
-        u8 typ = data[2];
-        const char* tname = (typ < 12) ? g_scd_op28_names[typ] : "ZONE_UNK";
-        if (typ == 0 && len >= 48) { /* door: destination at +0x1C (room) / +0x1D (stage) */
-            s16 x0 = rs16(data+4), z0 = rs16(data+6);
-            s16 x1 = rs16(data+8), z1 = rs16(data+10);
-            u8 dest_stage = data[0x1D];
-            u8 dest_room = data[0x1C];
-            _snprintf(buf, bufsz, "slot=%d, %s, rect=(%d,%d)-(%d,%d), dest=ST%X%02X",
-                      slot, tname, x0, z0, x1, z1, dest_stage, dest_room);
-        } else if (len >= 12) {
-            s16 x0 = rs16(data+4), z0 = rs16(data+6);
-            s16 x1 = rs16(data+8), z1 = rs16(data+10);
-            _snprintf(buf, bufsz, "slot=%d, %s, rect=(%d,%d)-(%d,%d)",
-                      slot, tname, x0, z0, x1, z1);
-        } else {
-            _snprintf(buf, bufsz, "slot=%d, %s", slot, tname);
-        }
+        char action[160];
+        dc1_aot_format_record(data, len, action, sizeof(action));
+        if (len >= 20)
+            _snprintf(buf, bufsz, "slot=%d, %s, quad=(%d,%d)..(%d,%d)", slot, action,
+                      rs16(data+4), rs16(data+6), rs16(data+16), rs16(data+18));
+        else
+            _snprintf(buf, bufsz, "slot=%d, %s", slot, action);
         return;
     }
     case 0x2E: /* CAM_SET: eye, target, transition of each (0 = cut) */
@@ -288,7 +282,15 @@ bool scd_disassemble(const u8* dec, size_t dec_size, u32 base_addr,
             u8 op = scd[pc];
             int sz = scd_inst_size(scd, scd_size, pc);
 
-            if (sz == 0) break; /* safety */
+            if (sz == 0) {
+                /* Not an opcode (>= 0x72): show the byte once, then stop. */
+                ScdLine& u = out.add();
+                u.offset = (u32)pc; u.thread = (u8)ti; u.opcode = op; u.size = 1;
+                fmt_hex(u.hex, sizeof(u.hex), scd + pc, 1);
+                _snprintf(u.text, sizeof(u.text), "    UNK_%02X", op);
+                _snprintf(u.comment, sizeof(u.comment), "; not an opcode, listing stops");
+                break;
+            }
             if (pc + sz > scd_size) break;
 
             ScdLine& l = out.add();
@@ -304,7 +306,7 @@ bool scd_disassemble(const u8* dec, size_t dec_size, u32 base_addr,
             if (op == 0x28 && pc + 3 <= scd_size) {
                 u8 typ = scd[pc + 2];
                 l.op28_type = typ;
-                name = (typ < 12) ? g_scd_op28_names[typ] : "ZONE_UNK";
+                name = "AOT";
             } else if (op < 0x70) {
                 name = g_scd_opcodes[op].name;
             } else {

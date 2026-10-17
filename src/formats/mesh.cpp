@@ -4,6 +4,7 @@
 #include "formats/mesh.h"
 #include "formats/scd.h"
 #include "formats/dc2.h"
+#include "formats/save_editor.h"
 #include "core/lzss.h"
 #include <stdlib.h>
 #include <stdio.h>
@@ -2138,7 +2139,6 @@ bool parse_rdt_scene_dec(const u8* dec_data, size_t dec_size, u32 base_addr,
                 if (n_scripts > 64) n_scripts = 64;
 
                 /* Opcode 0x28 size by type */
-                static const int op28sz[] = {48,40,32,36,44,32,32,52,32,32,32,32};
                 /* Fixed opcode sizes (index = opcode).
                    0x04=endif(1B), 0x10/0x11=control(1B).
                    0x0A=return(0=terminal), 0x0C=jump(0=handled separately). */
@@ -2177,7 +2177,7 @@ bool parse_rdt_scene_dec(const u8* dec_data, size_t dec_size, u32 base_addr,
                             adv = 1;
                         else if (op == 0x05 || op == 0x0F) adv = 4;
                         else if (op == 0x28 && pc + 3 <= dec_size)
-                            adv = (dec_data[pc+2] < 12) ? op28sz[dec_data[pc+2]] : 32;
+                            adv = (dec_data[pc+2] < 12) ? g_scd_op28_sizes[dec_data[pc+2]] : 32;
                         else if (op == 0x5A && pc + 4 <= dec_size)
                             adv = 4 + 8 * dec_data[pc+3];
                         else if (op < 0x70) adv = opsz[op];
@@ -2227,8 +2227,8 @@ bool parse_rdt_scene_dec(const u8* dec_data, size_t dec_size, u32 base_addr,
                             }
                         }
 
-                        /* Extract 0x28 type 4 door section pointers.
-                           sub_426DFC positions the section at door zone center. */
+                        /* Extract 0x28 action-4 item section pointers.
+                           sub_426DFC positions the section at the item zone center. */
                         if (op == 0x28 && pc + 3 <= dec_size && dec_data[pc + 2] == 4 && pc + 44 <= dec_size) {
                             u8 mdl_slot = dec_data[pc + 34];
                             if (mdl_slot != 0xFF) {
@@ -3048,41 +3048,448 @@ static void scan_section_placements(const u8* dec, size_t dec_size, u32 base,
     }
 }
 
-/* Trigger zones: every 0x28 opcode in the script area.  The script walk
-   stops at the first 0x01, but 0x01 is a 4-byte opcode that scripts
-   continue past, so it missed most zones in rooms like ST103 (its door
-   triggers among them).  As with section placements, scan the whole area
-   at 4-byte steps instead.  A real zone repeats its type at +20 and has 1
-   at +23; every 0x28 in all rooms that is not a zone (bytes of embedded
-   data tables) fails that test.  Scripts set the same zone from several
-   branches, so identical type + corners are kept once.  Returns the
-   number of zones added. */
-static int scan_trigger_zones(const u8* dec, size_t scd_base, size_t scd_end,
-                              RdtSceneOverlay& ov)
+/* MSVC's _snprintf does not NUL-terminate on overflow; AOT_SN does, so the
+   strlen-based appends below are safe.  It yields _snprintf's result. */
+static int aot_term(int r, char* out, size_t n) { out[n - 1] = 0; return r; }
+#define AOT_SN(out, n, ...) aot_term(_snprintf((out), (n), __VA_ARGS__), (out), (n))
+
+/* Action labels.  Action 1's handler (VA 0x44A069) runs a behaviour script
+   through 0x445C74 (dinorand EXE-SYMBOLS.md:139, STATIC-SCD-RE.md:3440);
+   action 7's (0x44AA00) also conditionally sets a flag byte of the slot
+   (EXE-SYMBOLS.md:457).  Those VAs are from the build dinorand's documents
+   use, not the GOG exe (C13).  Actions 5, 6 and 8-10 are traced in the
+   English DINO.exe (Classic REbirth; C13) through the 12-entry handler table
+   at 0x64FD58, and a field at handler offset n is record byte n + 4:
+   8 (0x44AAC3) is an emergency box, rec+0x1C box id (red below 8, green
+   below 13, else yellow), rec+0x1D plug cost; 10 (0x44ABDA) is where the
+   fingerprint is taken (item 0x41 becomes 0x42), rec+0x1C print id.  No room
+   uses 5 (0x44A87F: rec+0x1C to a player byte, rec+0x1D a sound effect),
+   6 (0x44A909: a directional player reaction with a cooldown) or 9 (0x44ABBC,
+   which returns at once). */
+const char* dc1_aot_action_name(u8 action)
 {
+    switch (action) {
+    case 0:  return "Door / room transition";
+    case 1:  return "Script-run interaction";
+    case 2:  return "Set flag on entry";
+    case 3:  return "Run event subroutine";
+    case 4:  return "Item pickup";
+    case 5:  return "Player byte + sound (unused)";
+    case 6:  return "Directional player reaction (unused)";
+    case 7:  return "Script + set-flag interaction";
+    case 8:  return "Emergency box";
+    case 9:  return "No-op (unused)";
+    case 10: return "Fingerprint-taking spot";
+    case 11: return "Laser-fence keypad";
+    default: return "Unknown action";
+    }
+}
+
+const char* dc1_aot_confidence_name(u8 confidence)
+{
+    return confidence == DC1_AOT_CONFIRMED ? "confirmed" :
+           confidence == DC1_AOT_DERIVED ? "derived" : "unknown";
+}
+
+static u8 dc1_aot_action_confidence(u8 action)
+{
+    switch (action) {
+    case 0: case 2: case 3: case 4: case 8: case 9: case 10: case 11: return DC1_AOT_CONFIRMED;
+    case 1: case 5: case 6: case 7: return DC1_AOT_DERIVED;
+    default: return DC1_AOT_UNKNOWN;
+    }
+}
+
+static void dc1_aot_raw_tail(const u8* rec, size_t len, char* out, size_t out_size)
+{
+    if (!out_size) return;
+    out[0] = 0;
+    size_t start = len > 20 ? 20 : 0;
+    int pos = 0;
+    for (size_t i = start; i < len && i < start + 12 && pos + 4 < (int)out_size; i++)
+    {
+        int r = AOT_SN(out + pos, out_size - pos, "%s%02X", i == start ? "" : " ", rec[i]);
+        if (r < 0) break;
+        pos += r;
+    }
+}
+
+void dc1_aot_format_record(const u8* rec, size_t len, char* out, size_t out_size)
+{
+    if (!out_size) return;
+    out[0] = 0;
+    if (!rec || len < 3) {
+        AOT_SN(out, out_size, "Malformed AOT");
+        return;
+    }
+    u8 action = rec[2];
+    const char* name = dc1_aot_action_name(action);
+    switch (action) {
+    case 0:
+        if (len >= 0x2A)
+            AOT_SN(out, out_size, "%s (type 0) -> ST%03X, lock %u, door kind %u",
+                      name, rd_u16(rec + 0x1C), rec[0x27], rec[0x28]);
+        break;
+    case 1:
+        if (len >= 0x22)
+            AOT_SN(out, out_size, "%s (type 1) - script +0x%X, arg %u",
+                      name, rd_u32(rec + 0x1C), rd_u16(rec + 0x20));
+        break;
+    case 2:
+        if (len >= 31)
+            AOT_SN(out, out_size, "%s (type 2) - flag %u:%u = %u",
+                      name, rec[28], rec[29], rec[30]);
+        break;
+    case 3:
+        if (len >= 32)
+            AOT_SN(out, out_size, "%s (type 3) -> sub %u, task %d",
+                      name, rd_u16(rec + 30), (s8)rec[28]);
+        break;
+    case 4:
+        if (len >= 0x24) {
+            /* 0xFF is an empty slot the script arms at run time (dinorand pickup table). */
+            u8 id = rec[0x1C];
+            const DcItem* item = dc_item_by_id(id);
+            if (id == 0xFF)
+                AOT_SN(out, out_size, "%s (type 4) - item set at run time, take flag 7:%u, display slot %u",
+                          name, rd_u16(rec + 0x20), rec[0x22]);
+            else
+                AOT_SN(out, out_size, "%s (type 4) - item 0x%02X%s%s x%u, take flag 7:%u, display slot %u",
+                          name, id, item->id == id ? " " : "", item->id == id ? item->name : "",
+                          rd_u16(rec + 0x1E), rd_u16(rec + 0x20), rec[0x22]);
+        }
+        break;
+    case 5:
+        if (len >= 0x1E)
+            AOT_SN(out, out_size, "%s (type 5) - player byte %u, sound %u",
+                      name, rec[0x1C], rec[0x1D]);
+        break;
+    case 6: case 9:
+        AOT_SN(out, out_size, "%s (type %u)", name, action);
+        break;
+    case 8:
+        if (len >= 0x1E)
+            AOT_SN(out, out_size, "%s (type 8) - box %u (%s), %u plug%s",
+                      name, rec[0x1C],
+                      rec[0x1C] < 8 ? "red" : rec[0x1C] < 13 ? "green" : "yellow",
+                      rec[0x1D], rec[0x1D] == 1 ? "" : "s");
+        break;
+    case 10:
+        if (len >= 0x1E)
+            AOT_SN(out, out_size, "%s (type 10) - print %u", name, rec[0x1C]);
+        break;
+    case 7:
+        if (len >= 48)
+            AOT_SN(out, out_size, "%s (type 7) - script +0x%X, arg %u, set-flag %s",
+                      name, rd_u32(rec + 40), rd_u16(rec + 46),
+                      rec[45] == 0xFF ? "none" : "present");
+        break;
+    case 11:
+        if (len >= 32)
+            AOT_SN(out, out_size, "%s (type 11) - toggle flag %u:%u, level %u, enable flag 0:%u",
+                      name, rec[28], rec[29], rec[30], rec[31]);
+        break;
+    }
+    if (!out[0]) {
+        char raw[48];
+        dc1_aot_raw_tail(rec, len, raw, sizeof(raw));
+        AOT_SN(out, out_size, "%s (type %u) - raw: %s", name, action, raw);
+    }
+}
+
+/* AI category at +2 of 0x20/0x59/0x5B (dinorand data/dc1/enemies.json). */
+static const char* dc1_species_name(u8 cls)
+{
+    switch (cls) {
+    case 1: return "human";
+    case 2: return "Velociraptor";
+    case 3: case 4: return "Tyrannosaurus";
+    case 5: return "small dinosaur";   /* medium confidence; likely Compsognathus */
+    case 7: return "Pteranodon";
+    case 8: return "Therizinosaurus";
+    default: return 0;
+    }
+}
+
+static void dc1_aot_behavior_name(u8 flags, u16 classes, int target,
+                                  char* out, size_t out_size)
+{
+    if (!out_size) return;
+    out[0] = 0;
+    struct Part { u8 bit; const char* name; } parts[] = {
+        { DC1_AOT_BEHAVIOR_DDK, "DDK event" },
+        { DC1_AOT_BEHAVIOR_CUTSCENE, "Cutscene" },
+        { DC1_AOT_BEHAVIOR_ENCOUNTER, "encounter" },
+        { DC1_AOT_BEHAVIOR_ITEM, "item event" },
+        { DC1_AOT_BEHAVIOR_INTERFACE, "interface/puzzle event" },
+    };
+    int pos = 0;
+    for (int i = 0; i < (int)(sizeof(parts) / sizeof(parts[0])); i++) {
+        if (!(flags & parts[i].bit)) continue;
+        int r = AOT_SN(out + pos, out_size - pos, "%s%s", pos ? " + " : "", parts[i].name);
+        if (r < 0) break;
+        pos += r;
+        if (pos >= (int)out_size) break;
+        if (parts[i].bit != DC1_AOT_BEHAVIOR_ENCOUNTER || !classes) continue;
+        /* Species in category order; the two T-Rex rigs (3, 4) print once. */
+        bool first = true;
+        for (int c = 0; c < 16 && pos < (int)out_size; c++) {
+            if (!(classes & (1u << c)) || (c == 4 && (classes & (1u << 3)))) continue;
+            const char* sp = dc1_species_name((u8)c);
+            r = sp ? AOT_SN(out + pos, out_size - pos, "%s%s", first ? " (" : ", ", sp)
+                   : AOT_SN(out + pos, out_size - pos, "%sclass %d", first ? " (" : ", ", c);
+            if (r < 0) break;
+            pos += r;
+            first = false;
+        }
+        if (pos < (int)out_size) {
+            r = AOT_SN(out + pos, out_size - pos, ")");
+            if (r > 0) pos += r;
+        }
+        if (pos >= (int)out_size) break;
+    }
+    if (!out[0]) AOT_SN(out, out_size, "Scripted event -> sub %d", target);
+}
+
+static void dc1_aot_behavior_basis(u8 flags, char* out, size_t out_size)
+{
+    if (!out_size) return;
+    out[0] = 0;
+    struct Part { u8 bit; const char* text; } parts[] = {
+        { DC1_AOT_BEHAVIOR_DDK, "op58 type 3" },
+        { DC1_AOT_BEHAVIOR_CUTSCENE, "flag(2,2) bracket" },
+        { DC1_AOT_BEHAVIOR_ENCOUNTER, "enemy placement" },
+        { DC1_AOT_BEHAVIOR_ITEM, "item AOT" },
+        { DC1_AOT_BEHAVIOR_INTERFACE, "native screen" },
+    };
+    int pos = 0;
+    for (int i = 0; i < (int)(sizeof(parts) / sizeof(parts[0])); i++) {
+        if (!(flags & parts[i].bit)) continue;
+        int r = AOT_SN(out + pos, out_size - pos, "%s%s", pos ? ", " : "", parts[i].text);
+        if (r < 0) break;
+        pos += r;
+        if (pos >= (int)out_size) break;
+    }
+    if (!out[0]) AOT_SN(out, out_size, "no proven target signature (target routine and the subs it starts, jumps to or calls)");
+}
+
+void dc1_aot_format_label(const RdtFloorZone& z, char* out, size_t out_size)
+{
+    if (!out_size) return;
+    char record[192];
+    dc1_aot_format_record(z.raw, z.raw_size, record, sizeof(record));
+    if (z.target_index == 3) {
+        char behavior[128];
+        dc1_aot_behavior_name(z.behavior_flags, z.enemy_classes, z.target_subroutine, behavior, sizeof(behavior));
+        AOT_SN(out, out_size, "Run event subroutine (type 3) -> sub %d - %s [%s]",
+                  z.target_subroutine, behavior, dc1_aot_confidence_name(z.behavior_confidence));
+    } else {
+        AOT_SN(out, out_size, "%s%s", record,
+                  z.action_confidence == DC1_AOT_DERIVED ? " [derived]" :
+                  z.action_confidence == DC1_AOT_UNKNOWN ? " [unknown]" : "");
+    }
+    int pos = (int)strlen(out);
+    if (pos < (int)out_size)
+        AOT_SN(out + pos, out_size - pos, "%s%s",
+                  z.owner_subroutine == 0 ? " - room initialization" : " - installed by sub ",
+                  z.owner_subroutine == 0 ? "" : "");
+    if (z.owner_subroutine != 0) {
+        pos = (int)strlen(out);
+        if (pos < (int)out_size) AOT_SN(out + pos, out_size - pos, "%u", z.owner_subroutine);
+    }
+    if (z.owner_targeted) {
+        pos = (int)strlen(out);
+        if (pos < (int)out_size) AOT_SN(out + pos, out_size - pos, " (targeted by another event)");
+    }
+    if (z.malformed) {
+        pos = (int)strlen(out);
+        if (pos < (int)out_size) AOT_SN(out + pos, out_size - pos, " [malformed]");
+    }
+}
+
+void dc1_aot_format_details(const RdtFloorZone& z, char* out, size_t out_size)
+{
+    if (!out_size) return;
+    char label[320], basis[160], length[32];
+    dc1_aot_format_label(z, label, sizeof(label));
+    dc1_aot_behavior_basis(z.behavior_flags, basis, sizeof(basis));
+    if (z.record_length)
+        AOT_SN(length, sizeof(length), "%u/%u", z.raw_size, z.record_length);
+    else
+        AOT_SN(length, sizeof(length), "%u/unknown", z.raw_size);
+    AOT_SN(out, out_size,
+              "%s\nRDT 0x%05X | owner sub %u | length %s | slot %u | action %s | basis: %s",
+              label, z.source_offset, z.owner_subroutine, length,
+              z.collision_group, dc1_aot_confidence_name(z.action_confidence),
+              z.target_index == 3 ? basis :
+              z.action_confidence == DC1_AOT_CONFIRMED ? "native action handler and record payload" :
+              "unverified");
+}
+
+/* Scan the target routine and, recursively, every sub it starts as a task
+   (0x01 <s8 task> <s16 sub>, handler 0x4A3103), jumps to (0x05) or calls
+   (0x0F): each holds a sub-table index at +2 (STATIC-SCD-RE cont.17 and
+   :557).  It does not follow 0x21 behaviour-script calls, which are offsets
+   rather than sub indices, and it does not interpret conditions, so both arms
+   of a branch count.  The cutscene bracket must open and close in one routine.
+   A 0x20 whose AI category (+2) is 1 is the HUMAN rig (Rick, Gail, Tom,
+   corpses; dinorand DATA-REFERENCE species table), not an encounter; 0x59 is
+   never category 1 in the 148 rooms.  Categories of the encounters are OR'd
+   into *classes. */
+static u8 dc1_classify_aot_sub(const u8* scd, size_t scd_size, const u32* starts,
+                               int n_subs, int target, int depth, u64* visited,
+                               u16* classes)
+{
+    if (target < 0 || target >= n_subs || depth > 4) return 0;
+    if (*visited & (1ull << target)) return 0;
+    *visited |= 1ull << target;
+    size_t pc = starts[target];
+    size_t end = scd_thread_end(scd, scd_size, starts, n_subs, pc);
+    bool cutscene_on = false, cutscene_off = false;
+    u8 result = 0;
+    while (pc < end) {
+        int len = scd_inst_size(scd, scd_size, pc);
+        if (len <= 0 || pc + (size_t)len > end) break;
+        u8 op = scd[pc];
+        if (op == 0x58 && len >= 4) {
+            if (scd[pc + 2] == 3) result |= DC1_AOT_BEHAVIOR_DDK;
+            else result |= DC1_AOT_BEHAVIOR_INTERFACE;
+        }
+        if (op == 0x25 && len >= 4 && scd[pc + 1] == 2 && scd[pc + 2] == 2) {
+            cutscene_on |= scd[pc + 3] != 0;
+            cutscene_off |= scd[pc + 3] == 0;
+        }
+        if ((op == 0x20 || op == 0x59 || op == 0x5B) && len >= 3 &&
+            !(op == 0x20 && scd[pc + 2] == 1)) {
+            result |= DC1_AOT_BEHAVIOR_ENCOUNTER;
+            if (scd[pc + 2] < 16) *classes |= (u16)(1u << scd[pc + 2]);
+        }
+        if (op == 0x28 && len >= 3 && scd[pc + 2] == 4)
+            result |= DC1_AOT_BEHAVIOR_ITEM;
+        if ((op == 0x01 || op == 0x05 || op == 0x0F) && len >= 4)
+            result |= dc1_classify_aot_sub(scd, scd_size, starts, n_subs,
+                                           rd_u16(scd + pc + 2), depth + 1,
+                                           visited, classes);
+        pc += (size_t)len;
+    }
+    if (cutscene_on && cutscene_off) result |= DC1_AOT_BEHAVIOR_CUTSCENE;
+    return result;
+}
+
+static u8 dc1_classify_aot_target(const u8* scd, size_t scd_size,
+                                  const u32* starts, int n_subs, int target,
+                                  u16* classes)
+{
+    u64 visited = 0;
+    *classes = 0;
+    return dc1_classify_aot_sub(scd, scd_size, starts, n_subs, target, 0,
+                                &visited, classes);
+}
+
+/* Walk the function-table script by documented opcode lengths.  This keeps
+   same-geometry records with different payloads and exposes malformed or
+   unknown AOTs instead of silently treating data bytes as geometry. */
+int dc1_parse_aot_zones(const u8* scd, size_t scd_size, u32 source_base,
+                        RdtSceneOverlay& ov)
+{
+    if (!scd || scd_size < 4) return 0;
+    u32 table_size = rd_u32(scd);
+    if (table_size < 4 || table_size > scd_size || (table_size & 3) != 0) return 0;
+    int n_subs = (int)(table_size / 4);
+    if (n_subs > 64) return 0;
+    u32 starts[64];
+    for (int i = 0; i < n_subs; i++) {
+        starts[i] = rd_u32(scd + i * 4);
+        if (starts[i] < table_size || starts[i] >= scd_size ||
+            (i && starts[i] <= starts[i - 1])) return 0;
+    }
+
     int added = 0;
-    for (size_t pc = scd_base; pc + 24 <= scd_end && ov.n_zones < 64; pc += 4) {
-        u8 typ = dec[pc + 2];
-        if (dec[pc] != 0x28 || typ >= 12 || dec[pc + 20] != typ || dec[pc + 23] != 1)
-            continue;
-        RdtFloorZone z;
-        memset(&z, 0, sizeof(z));
-        for (int c = 0; c < 4; c++) {
-            z.x[c] = rd_s16(dec + pc + 4 + c * 4);
-            z.z[c] = rd_s16(dec + pc + 4 + c * 4 + 2);
+    for (int sub = 0; sub < n_subs; sub++) {
+        size_t pc = starts[sub];
+        size_t end = scd_thread_end(scd, scd_size, starts, n_subs, pc);
+        while (pc < end) {
+            if (scd[pc] != 0x28) {
+                int len = scd_inst_size(scd, scd_size, pc);
+                if (len <= 0 || pc + (size_t)len > end) break;
+                pc += (size_t)len;
+                continue;
+            }
+
+            size_t available = end - pc;
+            u8 action = available > 2 ? scd[pc + 2] : 0xFF;
+            int expected = action < 12 ? g_scd_op28_sizes[action] : 0;
+            size_t actual = expected ? (size_t)expected : (available < 32 ? available : 32);
+            if (actual > available) actual = available;
+            if (actual > 52) actual = 52;
+
+            RdtFloorZone z;
+            memset(&z, 0, sizeof(z));
+            z.kind = RDT_ZONE_TRIGGER;
+            z.target_index = action;
+            z.collision_group = available > 1 ? scd[pc + 1] : 0;
+            z.source_offset = source_base + (u32)pc;
+            z.owner_subroutine = (u8)sub;
+            z.record_length = (u8)expected;
+            z.raw_size = (u8)actual;
+            z.malformed = expected == 0 || available < (size_t)expected;
+            z.action_confidence = z.malformed ? DC1_AOT_UNKNOWN : dc1_aot_action_confidence(action);
+            z.behavior_confidence = DC1_AOT_UNKNOWN;
+            z.task = -1;
+            z.target_subroutine = -1;
+            if (actual) memcpy(z.raw, scd + pc, actual);
+            if (actual >= 20)
+                for (int c = 0; c < 4; c++) {
+                    z.x[c] = rd_s16(scd + pc + 4 + c * 4);
+                    z.z[c] = rd_s16(scd + pc + 6 + c * 4);
+                }
+            if (action == 3 && actual >= 32) {
+                z.task = (s8)scd[pc + 28];
+                z.target_subroutine = (s16)rd_u16(scd + pc + 30);
+            }
+
+            bool duplicate = false;
+            for (int i = 0; i < ov.n_zones && !duplicate; i++) {
+                const RdtFloorZone& old = ov.zones[i];
+                duplicate = old.kind == RDT_ZONE_TRIGGER &&
+                            old.owner_subroutine == z.owner_subroutine &&
+                            old.raw_size == z.raw_size &&
+                            memcmp(old.raw, z.raw, z.raw_size) == 0;
+            }
+            if (!duplicate) {
+                ov.n_aots_total++;
+                if (ov.n_zones < 64) {
+                    ov.zones[ov.n_zones++] = z;
+                    added++;
+                } else {
+                    ov.aot_overflow = 1;
+                }
+            }
+            /* Unknown sub-types step 32, as scd_inst_size does. */
+            size_t step = expected ? (size_t)expected : 32;
+            if (step > available) break;
+            pc += step;
         }
-        z.collision_group = dec[pc + 1];   /* zone slot */
-        z.target_index    = typ;
-        z.kind            = RDT_ZONE_TRIGGER;
-        bool dup = false;
-        for (int i = 0; i < ov.n_zones && !dup; i++) {
-            const RdtFloorZone& o = ov.zones[i];
-            dup = o.kind == RDT_ZONE_TRIGGER && o.target_index == typ &&
-                  memcmp(o.x, z.x, sizeof(z.x)) == 0 && memcmp(o.z, z.z, sizeof(z.z)) == 0;
+    }
+
+    for (int i = 0; i < ov.n_zones; i++) {
+        RdtFloorZone& z = ov.zones[i];
+        if (z.kind != RDT_ZONE_TRIGGER || z.target_index != 3 || z.malformed) continue;
+        z.behavior_flags = dc1_classify_aot_target(scd, scd_size, starts, n_subs,
+                                                   z.target_subroutine, &z.enemy_classes);
+        z.behavior_confidence = z.behavior_flags ? DC1_AOT_DERIVED : DC1_AOT_UNKNOWN;
+    }
+    for (int i = 0; i < ov.n_zones; i++) {
+        RdtFloorZone& z = ov.zones[i];
+        if (z.kind != RDT_ZONE_TRIGGER || z.owner_subroutine == 0) continue;
+        for (int j = 0; j < ov.n_zones; j++) {
+            const RdtFloorZone& source = ov.zones[j];
+            if (source.kind == RDT_ZONE_TRIGGER && source.target_index == 3 &&
+                !source.malformed && source.target_subroutine == z.owner_subroutine) {
+                z.owner_targeted = 1;
+                break;
+            }
         }
-        if (dup) continue;
-        ov.zones[ov.n_zones++] = z;
-        added++;
     }
     return added;
 }
@@ -3402,7 +3809,7 @@ bool parse_rdt_overlay(const u8* dec, size_t dec_size, u32 base_addr,
        is 40 in 147 of the 148 rooms, ST60E being the exception) filled by SCD
        opcode 0x28.  The static data here is just uninitialized slot storage — not
        zone geometry.
-       Door zones come from 0x28 type 4 in the SCD walk below. */
+       Door zones come from 0x28 action 0 in the SCD walk below. */
 
     /* ─── Camera Thread Zones (ptr[3]) ───
      * u32 count, then count × 68-byte thread descriptors (word_645F58 = 68 for all types).
@@ -3486,7 +3893,8 @@ bool parse_rdt_overlay(const u8* dec, size_t dec_size, u32 base_addr,
         size_t scd_end = dec_size;
         for (int i = 0; i < 7; i++)
             if (offs[i] > scd_base && offs[i] < scd_end) scd_end = offs[i];
-        if (scan_trigger_zones(dec, scd_base, scd_end, ov)) found++;
+        if (dc1_parse_aot_zones(dec + scd_base, scd_end - scd_base,
+                                (u32)scd_base, ov)) found++;
         if (scan_enemy_spawns(dec, scd_base, scd_end, base, dec_size, ov)) found++;
         scan_camera_views(dec, scd_base, scd_end, ov);
 
@@ -3518,7 +3926,7 @@ bool parse_rdt_overlay(const u8* dec, size_t dec_size, u32 base_addr,
                 /* ─── Extract spatial data from known opcodes ───
                    (0x23 and item-zone section placements are found by
                    scan_section_placements, and 0x28 zones by
-                   scan_trigger_zones, not by this walk.) */
+                   dc1_parse_aot_zones, not by this walk.) */
 
                 /* 0x42: Object (20 bytes), handler 0x4284AD.  Fills a 0x7C-byte
                    object record: byte[1] = record index (0xFF: any free one),

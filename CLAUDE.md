@@ -24,7 +24,8 @@ The live workflow on this machine is MSBuild with the VS project. The project pi
 - **Automated tests:**
   - The GLB fixture: `tests/export_fixture.cpp` and `tests/check_glb.py`, run as described in EXPORTING.md. It needs g++ and NumPy, and neither is installed here. It is currently stale (T1 below).
   - Dino Crisis 2: `tests/test_dc2.cpp` builds its inputs in code and runs anywhere (it is in the Linux CI job). `tests/dc2_corpus.cpp` and `tests/check_dc2_corpus.py` read a real install and compare with dinorand's readers; see **Dino Crisis 2**.
-- **DC1 parsers and rendering:** there are no tests. Correctness is checked against real game DATs, which are not in the repo, and against the user's screenshots and visual QA.
+- **DC1 AOTs:** `tests/test_dc1_aot.cpp` builds its inputs in code and is in the Linux CI job; build it with the DC2 command's source list (below) and `tests/test_dc1_aot.cpp` in place of `tests/test_dc2.cpp`. `tests/dc1_aot_corpus.cpp` reads real ST*.DAT paths (`dc1_aot_corpus paths.txt > report.tsv`, `-` for stdin) and `python3 tests/check_dc1_aot_corpus.py -` validates the six regional installs; only malformed or overflow rows fail it, the other figures are warnings. It passes on all six builds (2026-10-18).
+- **Other DC1 parsers and rendering:** there are no tests. Correctness is checked against real game DATs, which are not in the repo, and against the user's screenshots and visual QA.
   - A successful build does not show that a rendering or format change is right. Say what still needs checking in the viewer, and name the room (for example ST10A, ST103 or ST112).
 - Never commit game assets, built exes or exported GLBs. `bin/` is git-ignored.
 
@@ -79,7 +80,7 @@ DC2 is detected by content, in `dat_parse_memory` (`DatArchive::is_dc2`): its he
 - **Where the code departs from dinorand, on purpose.** Slot 2's header, the vertex-to-bone rule, quad order, the `.TEX` layout and the 4096 limit on a part's offset; each is explained in a comment where it is read and listed in [DC2-DINORAND-HANDOFF.md](DC2-DINORAND-HANDOFF.md).
 - **Unit tests** (no game needed):
   ```sh
-  g++ -std=c++11 -Iinclude -D_snprintf=snprintf tests/test_dc2.cpp src/formats/dat.cpp src/formats/dc2_room.cpp src/formats/dc2_scd.cpp src/formats/dc2_model.cpp src/formats/texture.cpp src/formats/mesh.cpp src/core/lzss.cpp src/core/color.cpp -o test_dc2 && ./test_dc2
+  g++ -std=c++11 -Iinclude -D_snprintf=snprintf tests/test_dc2.cpp src/formats/dat.cpp src/formats/dc2_room.cpp src/formats/dc2_scd.cpp src/formats/dc2_model.cpp src/formats/texture.cpp src/formats/mesh.cpp src/formats/save_editor.cpp src/core/lzss.cpp src/core/color.cpp -o test_dc2 && ./test_dc2
   ```
 - **Corpus check** (needs the game and a dinorand checkout; prints `SKIPPED` and exits 0 without them):
   ```sh
@@ -131,7 +132,7 @@ Both exes are MSVC x64 builds with the static runtime (`/MT`), so they need no e
 3. **CLI.** In a scratch folder, from cmd.exe:
    ```bat
    call "C:\Program Files\Microsoft Visual Studio\18\Insiders\VC\Auxiliary\Build\vcvars64.bat"
-   cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I E:\RaptorScope\include E:\RaptorScope\tools\dc1_export.cpp E:\RaptorScope\src\formats\dat.cpp E:\RaptorScope\src\formats\mesh.cpp E:\RaptorScope\src\formats\dc2_model.cpp E:\RaptorScope\src\core\lzss.cpp /Fe:dc1_export.exe
+   cl /nologo /O2 /MT /EHsc /W3 /D_CRT_SECURE_NO_WARNINGS /I E:\RaptorScope\include E:\RaptorScope\tools\dc1_export.cpp E:\RaptorScope\src\formats\dat.cpp E:\RaptorScope\src\formats\mesh.cpp E:\RaptorScope\src\formats\save_editor.cpp E:\RaptorScope\src\formats\dc2_model.cpp E:\RaptorScope\src\core\lzss.cpp /Fe:dc1_export.exe
    ```
    Run with no arguments, it should print its usage line and exit with code 2.
 4. **Notes.** Write `RELEASE_NOTES.md`, following the rules below.
@@ -249,6 +250,8 @@ Ordered with memory safety and data loss first.
   - Only `mesh_apply_xforms` sets `MeshTri::solid`. Characters, doors and the fallback room parsers leave it at 0, so index 0 of an 8-bit palette that holds `0x8000` is still a hole on all their faces.
   - A semi-transparent ABR 0 face should show `0x8000` as the background at half brightness. The viewer discards the texel instead. For ABR 1 to 3 the hole is correct, because black adds or subtracts nothing.
   - The solid slice of a CLUT row used by both kinds of face is allocated last. When the atlas reaches `GL_MAX_TEXTURE_SIZE` it is dropped and those faces use the masked slice. At a 16384 limit this leaves 1,231 faces in st600, st609, st900 and stC00 with holes.
+- **B54** **DC1 AOT action-3 behaviour is still often unnamed (verify).** The classifier follows the target routine and the subs it starts (0x01), jumps to (0x05) or calls (0x0F), but not 0x21 behaviour-script calls (offsets, not sub indices). It does not interpret conditions, so both arms of a branch count, and a partial match still reads as derived. In the English rooms 418 of 738 action-3 records (57%) stay `Scripted event`; 244 of those are a 0x21 + 0x12 pattern that looks like examine text but stays unnamed until op 0x12 is traced.
+- **B55** **DC1 AOT labels and the overflow header have not been looked at in the viewer (verify).** Check: a door (action 0) in ST10A and ST103 for label and destination; a script-run interaction (action 1 or 7) and an item pickup; an emergency box (action 8) in ST104, shown with box id, colour and plug cost; a fingerprint-taking spot (action 10) in ST103, shown with its print id; ST304's crowded trigger list (57 raw records, 44 retained, header shows the dropped count if over 64); F4 on ST304 shows `UNK_xx` lines where it used to truncate.
 
 ### Contradictions (code vs README, comments or other code)
 
@@ -260,12 +263,12 @@ Ordered with memory safety and data loss first.
 - **C4** **Two opcode-size tables disagree.**
   - The tables are `scd_inst_size`/`g_scd_opcodes` (`scd.h`) and `opsz` in `parse_rdt_scene_dec` (`mesh.cpp`).
   - `opsz` gives 0x04 one byte and treats 0x0A as a script end, where `scd_inst_size` gives both 4 bytes.
-  - The 0x28 size table exists twice (`g_scd_op28_sizes` and `op28sz`), and the 0x5A rule (4 + 8 × byte 3) is now written out in both walkers.
+  - `opsz` also gives 0x10/0x11 one byte (`scd_inst_size`: 2) and bytes from 0x70 up one byte (`scd_inst_size`: 0 from 0x72, which is not an opcode).
+  - The 0x28 size table is now only `g_scd_op28_sizes` (`op28sz` is gone). The 0x5A rule (4 + 8 × byte 3) is still written out in both walkers.
 - **C5** **Stale comments.**
   - `mesh.h`'s RDT block calls ptr[0] the "SCD main script table"; it holds lights and ambient.
   - `parse_rdt_overlay` has two stacked banners, one listing ptr[2] as camera data.
   - `MeshTri::alt` says "SCD branch variant"; it now means an unplaced section.
-  - `ov_draw_zone` calls type 4 a door; it is an item pickup.
   - `mesh_apply_xforms` says it only adds non-zero placements on top of `parse_room_mesh_dec`.
   - `parse_rdt_scene_dec` claims inline sections start at 0x00 and that variants are merged by position; `alternate` is always false.
   - `export_room_glb` says "PSX units"; it writes metres.
@@ -314,7 +317,7 @@ Ordered with memory safety and data loss first.
 - **P4** **UV editor sort is quadratic.** `ShowUVEditor` uses an O(n²) insertion sort, commented "small N", though rooms have 10K+ faces.
 - **P5** **Fixed limits drop data silently.** The limits are:
   - 64 placements/sections (slot masks are u64)
-  - 64 zones shared by floor zones and 0x28 trigger zones
+  - 64 zones shared by floor zones and 0x28 AOTs (AOT overflow is now shown in the overlay tree's trigger header as "N of M, rest dropped")
   - 32 cameras and 16 characters
   - 16 textures and 16 palettes in the atlas and the face-CLUT renderer
   - 16 EMDs per entry, and 64 `g_emd_info` entries (beyond that, selecting EMD n shows EMD 1)

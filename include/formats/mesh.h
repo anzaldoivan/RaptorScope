@@ -328,6 +328,20 @@ const char* get_bone_name(int bone_count, int bone_idx);
 enum { RDT_ZONE_FLOOR = 0, RDT_ZONE_TRIGGER = 1,
        RDT_ZONE_SOUND = 2 };  /* DC2 slot 6; listed with the floor zones, collision_group = floor */
 
+enum Dc1AotConfidence {
+    DC1_AOT_UNKNOWN = 0,
+    DC1_AOT_DERIVED,
+    DC1_AOT_CONFIRMED,
+};
+
+enum Dc1AotBehavior {
+    DC1_AOT_BEHAVIOR_DDK       = 1 << 0,
+    DC1_AOT_BEHAVIOR_CUTSCENE  = 1 << 1,
+    DC1_AOT_BEHAVIOR_ENCOUNTER = 1 << 2,
+    DC1_AOT_BEHAVIOR_ITEM      = 1 << 3,
+    DC1_AOT_BEHAVIOR_INTERFACE = 1 << 4,
+};
+
 struct RdtFloorZone {
     s16 x[4], z[4];          /* 4 corner XZ coords (world-space) */
     s16 y;                    /* floor Y position */
@@ -337,7 +351,31 @@ struct RdtFloorZone {
     u8  flags;                /* floor zone: record byte +18 (0 in every room); 0x28 zone: 0 */
     u8  kind;                 /* RDT_ZONE_FLOOR or RDT_ZONE_TRIGGER, set by the parser that adds it */
     s16 arg;                  /* DC2 script zone: door destination, routine or item id; -1 = computed by the script */
+
+    /* DC1 0x28 AOT metadata.  The raw record is retained so unknown actions
+       remain inspectable and byte-identical records can be deduplicated. */
+    u32 source_offset;        /* offset in the decompressed RDT */
+    u8  owner_subroutine;     /* function-table subroutine containing the record */
+    u8  record_length;        /* documented subtype length */
+    u8  raw_size;             /* bytes actually available (shorter means malformed) */
+    u8  action_confidence;
+    u8  behavior_confidence;
+    u8  behavior_flags;       /* Dc1AotBehavior bits for action 3 */
+    u16 enemy_classes;        /* action 3: bit n = an encounter places AI category n */
+    u8  malformed;
+    u8  owner_targeted;       /* owner is the target of another action-3 AOT */
+    s8  task;                 /* action 3 task/thread */
+    s16 target_subroutine;    /* action 3 target; valid only when action == 3 (the DC1 parser sets -1
+                                  otherwise; DC2 zones and DC1 floor zones leave it 0) */
+    u8  raw[52];              /* largest documented 0x28 record */
 };
+
+const char* dc1_aot_action_name(u8 action);
+const char* dc1_aot_confidence_name(u8 confidence);
+void dc1_aot_format_record(const u8* record, size_t length,
+                           char* out, size_t out_size);
+void dc1_aot_format_label(const RdtFloorZone& zone, char* out, size_t out_size);
+void dc1_aot_format_details(const RdtFloorZone& zone, char* out, size_t out_size);
 
 /*─── Collision rectangle ───────────────────────────────────────*/
 struct RdtCollisionRect {
@@ -357,7 +395,7 @@ struct RdtCameraEntry {
 
 /*─── Door / room transition ────────────────────────────────────*/
 /* ptr[4] is a runtime pointer table filled by SCD opcode 0x28.
-   Door zones come from 0x28 type 4, stored in the zones[] array. */
+   Door zones are 0x28 action 0; action 4 is an item pickup. */
 
 /*─── Camera cut trigger zone ──────────────────────────────────*/
 /* From ptr[2] camera cut table — spatial region activating a camera.
@@ -465,6 +503,8 @@ struct RdtPoly {
 /*─── Complete RDT scene overlay ────────────────────────────────*/
 struct RdtSceneOverlay {
     RdtFloorZone      zones[64];       int n_zones;
+    int               n_aots_total;    /* DC1 retained semantic records before capacity clipping */
+    int               aot_overflow;
     RdtCollisionRect  collisions[256]; int n_collisions;
     RdtCameraEntry    cameras[32];     int n_cameras;
     RdtSectionXform   xforms[64];      int n_xforms;
@@ -525,6 +565,11 @@ struct RdtSceneOverlay {
 /*─── Parse RDT scene overlay from decompressed blob ────────────*/
 bool parse_rdt_overlay(const u8* dec, size_t dec_size, u32 base_addr,
                        RdtSceneOverlay& overlay);
+
+/* Parse the function-table SCD stream and append its DC1 0x28 AOT records.
+   source_base is the SCD stream's offset in the decompressed RDT. */
+int dc1_parse_aot_zones(const u8* scd, size_t scd_size, u32 source_base,
+                        RdtSceneOverlay& overlay);
 
 /* Floor heights (viewer Y) for the overlay's flat shapes, found from the
    upward-facing horizontal faces of the placed room mesh: sets floor_y,

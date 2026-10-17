@@ -2447,13 +2447,13 @@ static void ov_draw_zone(const RdtSceneOverlay& ov, int i) {
     if (z.kind == RDT_ZONE_TRIGGER) {
         /* SCD 0x28 zone — color by type number.
            Type only determines data layout size, not gameplay role.
-           Only type 4 is confirmed as door (exe calls sub_426DFC). */
+           Names and behavior are shown in the tree and trigger details. */
         switch (z.target_index) {
             case 0: ov_color(1.0f, 0.4f, 0.1f); break;  /* orange = type 0 */
             case 1: ov_color(0.2f, 0.7f, 1.0f); break;  /* light blue = type 1 */
             case 2: ov_color(0.9f, 0.9f, 0.2f); break;  /* yellow = type 2 */
             case 3: ov_color(0.2f, 0.9f, 0.5f); break;  /* mint = type 3 */
-            case 4: ov_color(0.0f, 0.9f, 0.9f); break;  /* cyan = type 4 (door) */
+            case 4: ov_color(0.0f, 0.9f, 0.9f); break;  /* cyan = type 4 (item) */
             default: ov_color(0.8f, 0.3f, 0.8f); break; /* purple = other */
         }
         ov_width((z.target_index == 4) ? 3.0f : 2.0f);
@@ -3535,7 +3535,7 @@ void ViewerPanel3D::fill_ov_tree() {
     };
     const RdtSceneOverlay& ov = cached_overlay;
     const char* const* names = ov.dc2 ? names_dc2 : names_dc1;
-    char buf[128];
+    char buf[320];
     for (int t = 0; t < OverlayVis::N_TYPES; t++) {
         HTREEITEM h = ov_tree_add(ov_tree, TVI_ROOT, names[t], t, -1, ov_vis.on[t]);
         int n = 0;
@@ -3600,11 +3600,14 @@ void ViewerPanel3D::fill_ov_tree() {
                     _snprintf(buf, sizeof(buf) - 1, "#%d  Item 0x%02X", n + 1, (unsigned)(u16)z.arg);
                 else if (ov.dc2)
                     _snprintf(buf, sizeof(buf) - 1, "#%d  Trigger, routine %d", n + 1, z.arg);
-                else if (t == OverlayVis::TRIGGERS)
-                    _snprintf(buf, sizeof(buf) - 1, "#%d  type %d%s", n + 1, z.target_index,
-                              z.target_index == 4 ? " (item)" : "");
+                else if (t == OverlayVis::TRIGGERS) {
+                    char label[280];
+                    dc1_aot_format_label(z, label, sizeof(label));
+                    _snprintf(buf, sizeof(buf) - 1, "#%d  %s", n + 1, label);
+                }
                 else
                     _snprintf(buf, sizeof(buf) - 1, "#%d  step %d", n + 1, z.target_index);
+                buf[sizeof(buf) - 1] = 0;
                 OV_ITEM(i);
             }
             break;
@@ -3668,7 +3671,11 @@ void ViewerPanel3D::fill_ov_tree() {
         }
 #undef OV_ITEM
         if (n == 0) { TreeView_DeleteItem(ov_tree, h); continue; }
-        _snprintf(buf, sizeof(buf) - 1, "%s  (%d)", names[t], n);
+        if (!ov.dc2 && t == OverlayVis::TRIGGERS && ov.aot_overflow)
+            _snprintf(buf, sizeof(buf) - 1, "%s  (%d of %d, rest dropped)", names[t], n, ov.n_aots_total);
+        else
+            _snprintf(buf, sizeof(buf) - 1, "%s  (%d)", names[t], n);
+        buf[sizeof(buf) - 1] = 0;
         TVITEMA it;
         memset(&it, 0, sizeof(it));
         it.mask = TVIF_TEXT;
@@ -4890,19 +4897,29 @@ void ViewerPanel3D::render() {
     glCallLists((GLsizei)strlen(gl_info), GL_UNSIGNED_BYTE, gl_info);
 
     /* Object pick info — third/fourth line, yellow accent */
-    if (pick_tri >= 0 && pick_info[0]) {
+    char trigger_info[512];
+    trigger_info[0] = 0;
+    if (!cached_overlay.dc2 && ov_vis.sel_type == OverlayVis::TRIGGERS &&
+        ov_vis.sel_item >= 0 && ov_vis.sel_item < cached_overlay.n_zones) {
+        const RdtFloorZone& z = cached_overlay.zones[ov_vis.sel_item];
+        if (z.kind == RDT_ZONE_TRIGGER)
+            dc1_aot_format_details(z, trigger_info, sizeof(trigger_info));
+    }
+    const char* detail_info = trigger_info[0] ? trigger_info :
+                              (pick_tri >= 0 && pick_info[0] ? pick_info : 0);
+    if (detail_info) {
         glColor3f(1.0f, 0.9f, 0.2f);
         /* Split on newline to render two lines */
-        const char* nl = strchr(pick_info, '\n');
+        const char* nl = strchr(detail_info, '\n');
         if (nl) {
-            int len1 = (int)(nl - pick_info);
+            int len1 = (int)(nl - detail_info);
             glRasterPos2i(8, sh - 48);
-            glCallLists(len1, GL_UNSIGNED_BYTE, pick_info);
+            glCallLists(len1, GL_UNSIGNED_BYTE, detail_info);
             glRasterPos2i(8, sh - 64);
             glCallLists((GLsizei)strlen(nl + 1), GL_UNSIGNED_BYTE, nl + 1);
         } else {
             glRasterPos2i(8, sh - 48);
-            glCallLists((GLsizei)strlen(pick_info), GL_UNSIGNED_BYTE, pick_info);
+            glCallLists((GLsizei)strlen(detail_info), GL_UNSIGNED_BYTE, detail_info);
         }
     }
 
@@ -4928,11 +4945,12 @@ void ViewerPanel3D::render() {
         struct LegendRow { float r, g, b; int type, zone; const char* label; };
         static const LegendRow rows[] = {
             { 0.0f, 0.8f, 0.2f, OverlayVis::RECTS, -1,       "Green  = Collision rect (ptr[1])" },
-            { 1.0f, 0.4f, 0.1f, OverlayVis::TRIGGERS, 0,     "Orange = Zone type 0 (0x28)" },
-            { 0.2f, 0.7f, 1.0f, OverlayVis::TRIGGERS, 1,     "LtBlue = Zone type 1 (0x28)" },
-            { 0.9f, 0.9f, 0.2f, OverlayVis::TRIGGERS, 23,    "Yellow = Zone type 2/3 (0x28)" },
-            { 0.0f, 0.9f, 0.9f, OverlayVis::TRIGGERS, 4,     "Cyan   = Zone type 4 item (0x28)" },
-            { 0.8f, 0.3f, 0.8f, OverlayVis::TRIGGERS, 5,     "Purple = Zone, other type (0x28)" },
+            { 1.0f, 0.4f, 0.1f, OverlayVis::TRIGGERS, 0,     "Orange = Door / transition (type 0)" },
+            { 0.2f, 0.7f, 1.0f, OverlayVis::TRIGGERS, 1,     "LtBlue = Script-run interaction (type 1)" },
+            { 0.9f, 0.9f, 0.2f, OverlayVis::TRIGGERS, 2,     "Yellow = Set flag on entry (type 2)" },
+            { 0.2f, 0.9f, 0.5f, OverlayVis::TRIGGERS, 3,     "Mint   = Run event subroutine (type 3)" },
+            { 0.0f, 0.9f, 0.9f, OverlayVis::TRIGGERS, 4,     "Cyan   = Item pickup (type 4)" },
+            { 0.8f, 0.3f, 0.8f, OverlayVis::TRIGGERS, 5,     "Purple = Other action (types 5-11)" },
             { 1.0f, 1.0f, 0.0f, OverlayVis::FLOOR_ZONES, -1, "Yellow = Floor zone" },
             { 0.6f, 0.3f, 0.85f,OverlayVis::CAM_CUTS, -1,    "Violet = Camera cut zone" },
             { 0.9f, 0.85f, 0.5f,OverlayVis::LIGHTS, -1,      "Gold   = Scene light (ptr[0])" },
@@ -4969,8 +4987,7 @@ void ViewerPanel3D::render() {
                     const RdtFloorZone& z = ov.zones[i];
                     if ((z.kind == RDT_ZONE_TRIGGER) != (row.type == OverlayVis::TRIGGERS)) continue;
                     int zt = z.target_index;
-                    if (row.zone < 0 || zt == row.zone || (row.zone == 23 && (zt == 2 || zt == 3)) ||
-                        (row.zone == 5 && zt > 4)) n++;
+                    if (row.zone < 0 || zt == row.zone || (row.zone == 5 && zt > 4)) n++;
                 }
             }
             if (n == 0) continue;

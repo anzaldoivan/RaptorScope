@@ -27,7 +27,7 @@ struct ScdOpcodeInfo {
    0x28 and 0x5A are variable-size (size 0 here — handled specially). */
 static const ScdOpcodeInfo g_scd_opcodes[0x70] = {
  /* 0x00 */ {  1, "NOP",           "No operation",                               9 },
- /* 0x01 */ {  4, "UNK_01",        "Unknown (4 bytes; not a thread end)",        0 },
+ /* 0x01 */ {  4, "TASK_START",    "Start a subroutine as a parallel task",      0 },
  /* 0x02 */ {  4, "EVT_NEXT",      "Yield to next frame",                        1 },
  /* 0x03 */ {  4, "EVT_CHAIN",     "Chain to event (conditional)",               0 },
  /* 0x04 */ {  4, "EVT_END",       "End of thread",                              0 },
@@ -42,8 +42,8 @@ static const ScdOpcodeInfo g_scd_opcodes[0x70] = {
  /* 0x0D */ {  4, "NOP_0D",        "No-op: the handler only advances pc by 4",   9 },
  /* 0x0E */ {  4, "JUMP_IF",       "Relative jump on the last test result",      0 },
  /* 0x0F */ {  4, "GOSUB",         "Gosub: push pc+4 and jump",                  0 },
- /* 0x10 */ {  1, "RETURN",        "Return: pop the saved pc",                   0 },
- /* 0x11 */ {  1, "HALT",          "Empty handler; pc never advances",           0 },
+ /* 0x10 */ {  2, "RETURN",        "Return: pop the saved pc",                   0 },
+ /* 0x11 */ {  2, "HALT",          "End/nop (2 bytes); never seen in corpus",           0 },
  /* 0x12 */ {  4, "MSG_WAIT",      "Wait on the two message flags",              7 },
  /* 0x13 */ {  4, "UNK_13",        "Unknown (4 bytes)",                           9 },
  /* 0x14 */ {  4, "CK_GAME",       "Check game state flag",                      0 },
@@ -63,8 +63,8 @@ static const ScdOpcodeInfo g_scd_opcodes[0x70] = {
  /* 0x22 */ {  4, "WORK_SET",      "Set working entity context",                 4 },
  /* 0x23 */ { 32, "SEC_INST",      "Section instance (xform mesh)",              3 },
  /* 0x24 */ {  8, "SEC_INFO",      "Section info / query",                       3 },
- /* 0x25 */ {  4, "SEC_POS",       "Section position set",                       3 },
- /* 0x26 */ {  4, "ROOM_SET",      "Room transition setup",                      3 },
+ /* 0x25 */ {  4, "FLAG_SET",      "Set flag(group, index, value)",               2 },
+ /* 0x26 */ {  4, "FLAG_TEST",     "Test flag(group, index)",                     0 },
  /* 0x27 */ {  4, "MAP_OPEN",      "Open map / area transition",                 3 },
  /* 0x28 */ {  0, "ZONE_DEF",      "Zone definition (variable size)",            3 },
  /* 0x29 */ {  8, "RAND",          "Random number generator",                    2 },
@@ -114,7 +114,7 @@ static const ScdOpcodeInfo g_scd_opcodes[0x70] = {
  /* 0x55 */ { 12, "ANIM_SET",      "Set animation clip",                         4 },
  /* 0x56 */ { 28, "CUTSCENE",      "Cutscene / cinematic data",                  8 },
  /* 0x57 */ {  8, "EFFECT_A",      "Visual effect type A",                       8 },
- /* 0x58 */ {  8, "EFFECT_B",      "Visual effect type B",                       8 },
+ /* 0x58 */ {  8, "SCREEN_OPEN",   "Open native interface screen",               7 },
  /* 0x59 */ { 20, "CHAR_PLACE",    "Character placement (category +2, model +4)", 4 },
  /* 0x5A */ {  0, "MODEL_SET",     "Set model display parameters (4 + 8 x byte 3)",3 },
  /* 0x5B */ { 44, "EM_SET",        "Dinosaur follows in from room +0x14",        4 },
@@ -144,13 +144,8 @@ static const ScdOpcodeInfo g_scd_opcodes[0x70] = {
 static const int g_scd_op28_sizes[12] = {
     48, 40, 32, 36, 44, 32, 32, 52, 32, 32, 32, 32
 };
-static const char* g_scd_op28_names[12] = {
-    "ZONE_DOOR",   "ZONE_FLOOR",  "ZONE_EXEC",   "ZONE_LADDER",
-    "ZONE_ITEM",   "ZONE_CUT",    "ZONE_T6",     "ZONE_LIGHT",
-    "ZONE_T8",     "ZONE_T9",     "ZONE_T10",    "ZONE_T11"
-};
-
-/* Size in bytes of the instruction at scd[pc] (0 = past scd_size). */
+/* Size in bytes of the instruction at scd[pc]. 0 = pc is past scd_size or the
+   byte is not an opcode (>= 0x72; the VM dispatch covers 0x00-0x71): callers stop. */
 static inline int scd_inst_size(const u8* scd, size_t scd_size, size_t pc) {
     if (pc >= scd_size) return 0;
     u8 op = scd[pc];
@@ -158,9 +153,10 @@ static inline int scd_inst_size(const u8* scd, size_t scd_size, size_t pc) {
     if (op == 0x00) return 1;
 
     /* 1-byte NOPs / control markers */
-    if (op == 0x10 || op == 0x11) return 1;
+    if (op == 0x10 || op == 0x11) return 2;
     if (op >= 0x19 && op <= 0x1F) return 1;
-    if (op >= 0x70) return 1;
+    if (op == 0x70 || op == 0x71) return 1;
+    if (op >= 0x72) return 0;
 
     /* Relative branch */
     if (op == 0x0C) return 4;
@@ -318,4 +314,3 @@ bool rdt_extract_text(const u8* dec, size_t dec_size, u32 base_addr,
                       RdtTextData& out);
 
 #endif /* SCD_H */
-

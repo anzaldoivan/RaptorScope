@@ -62,7 +62,7 @@ Full modified source is in `source/`. With MinGW-w64's `g++` and `windres` on PA
 A developer can compile the command-line tool on Linux:
 
 ```sh
-g++ -std=c++11 -O2 -Iinclude tools/dc1_export.cpp src/formats/dat.cpp src/formats/mesh.cpp src/formats/dc2_model.cpp src/core/lzss.cpp -o dc1_export
+g++ -std=c++11 -O2 -Iinclude tools/dc1_export.cpp src/formats/dat.cpp src/formats/mesh.cpp src/formats/save_editor.cpp src/formats/dc2_model.cpp src/core/lzss.cpp -o dc1_export
 ```
 
 ## Validation performed

@@ -22,9 +22,10 @@ struct DcItem {
     int         max_qty;
 };
 
-/* Full item table (0x00..0x23) */
+/* Full item table (0x00..0x85, with gaps) */
 extern const DcItem DC_ITEMS[];
 extern const int    DC_ITEM_COUNT;
+const DcItem* dc_item_by_id(u8 id);  /* DC_ITEMS[0] when the id is not listed */
 
 /* IDs that can go in inventory/cabinet slots */
 extern const u8 DC_SUPPLY_IDS[];
