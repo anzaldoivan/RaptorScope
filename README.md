@@ -44,7 +44,7 @@ The tool reconstructs the PSX GPU rendering pipeline in software — including 4
 - **Full room geometry** reconstructed from RDT (Room Data Table) files, including the two rooms that store their RDT uncompressed (ST50B, ST60E)
 - **Mixed BPP rendering**: 4bpp and 8bpp textures coexist in a single atlas via 2D sparse sub-palette allocation
 - **SCD script walker**: Decodes every script thread straight through, both sides of each branch, to extract camera shots (0x4C, and its short form 0x2E), objects (0x42: a type and position for each, mostly effect objects such as the 80 by ST10A's broken window), and enemy spawns (0x5B)
-- **Trigger zones**: Every 0x28 zone in the script area is found by scanning it, not by the walk, so zones set after an 0x01 (such as ST103's door triggers) are shown
+- **Trigger zones**: Every 0x28 AOT is read by walking each script subroutine with its subtype-dependent record length. The overlay retains its RDT offset, owner subroutine, raw payload, action, provenance, and (for action 3) target event behavior
 - **Scripted placement**: The room is built the way the game builds it — only the sections its scripts place into model slots are drawn. Placements (0x23, and item pickup zones 0x28 type 4) are found by scanning the whole script area, then later script writes to the slot (0x2A, 0x36, 0x37) adjust position and rotation, e.g. lifting items onto desks
 - **Item pickup models**: Type-4 zones (0x28) put their item model at the zone centre, as the game does
 - **Unplaced sections (H key)**: Sections the game stores but never places (unused leftovers, such as an unused DDK in ST103) are hidden by default; **H** shows them tinted magenta at their raw positions
@@ -74,11 +74,12 @@ Toggle with **O key** to see all parsed SCD data as colored wireframe overlays:
 | Color | Source |
 |---|---|
 | Green | Collision rectangles (ptr[1]) |
-| Orange | Zone type 0 (0x28) |
-| Light Blue | Zone type 1 (0x28) |
-| Yellow | Zone types 2/3 (0x28) |
-| Cyan | Item pickup zones, type 4 (0x28) |
-| Purple | Zones of other types (0x28) |
+| Orange | Door / room transition (0x28 type 0) |
+| Light Blue | Message / examine interaction (type 1) |
+| Yellow | Set flag on entry (type 2) |
+| Mint | Run event subroutine (type 3) |
+| Cyan | Item pickup (type 4) |
+| Purple | Extended and special actions (types 5-11) |
 | Yellow (flat) | Floor zones (ptr[6]), where footsteps sound different |
 | Violet | Camera cut zones (ptr[2]) |
 | Gold | Scene lights (ptr[0]) |
@@ -267,13 +268,33 @@ Type 7 entries decompress via LZSS to an RDT structure (ST50B and ST60E store th
 The room initialization script (ptr[5]) uses a multi-threaded virtual machine:
 
 - **Thread table**: Array of u32 offsets from SCD base; the first offset / 4 is the thread count
-- **Key opcodes**: 0x20 (character spawn), 0x23 (section instance), 0x28 (zone definition), 0x2E (camera eye + target, short form of 0x4C), 0x3A (installs a behaviour on the bound character; not a light: byte 1 is always 0 and byte 2 is 1-15), 0x3C (model slot render mode and OT depth), 0x48 (show/hide; type 3 = model slot), 0x42 (object: type at +2, position at +4/+6/+8), 0x4C (camera entry: eye +2, target +18; +8 and +24 are the eye and target transition modes, 0 = cut, not a field of view), 0x5B (a dinosaur follows the player in: character slot +1, type +2, position +4/+6/+8, rotation +10, model and animation +12/+16, source room +0x14, chance +0x15, follow distance +0x16, plain spawn +0x19, camera id +0x1A, subroutine +0x1B, camera position/target +0x1C/+0x24; handler 0x42A80D in the GOG exe), 0x59 (second character placement, 20 bytes: category +2, model +4, motion +8, a third pointer +12, the room's own index +16; it places the raptor in 52 rooms and the Therizinosaurus in 15), 0x5A (4 + 8 × byte 3 bytes), 0x64 (sets floor zone +1's footstep step to +2; handler 0x42BE92)
+- **Key opcodes**: 0x20 (character spawn), 0x23 (section instance), 0x25 (set flag: group, index, value), 0x26 (test flag), 0x28 (zone definition), 0x2E (camera eye + target, short form of 0x4C), 0x3A (installs a behaviour on the bound character; not a light: byte 1 is always 0 and byte 2 is 1-15), 0x3C (model slot render mode and OT depth), 0x48 (show/hide; type 3 = model slot), 0x42 (object: type at +2, position at +4/+6/+8), 0x4C (camera entry: eye +2, target +18; +8 and +24 are the eye and target transition modes, 0 = cut, not a field of view), 0x58 (open a native interface screen), 0x5B (a dinosaur follows the player in: character slot +1, type +2, position +4/+6/+8, rotation +10, model and animation +12/+16, source room +0x14, chance +0x15, follow distance +0x16, plain spawn +0x19, camera id +0x1A, subroutine +0x1B, camera position/target +0x1C/+0x24; handler 0x42A80D in the GOG exe), 0x59 (second character placement, 20 bytes: category +2, model +4, motion +8, a third pointer +12, the room's own index +16; it places the raptor in 52 rooms and the Therizinosaurus in 15), 0x5A (4 + 8 × byte 3 bytes), 0x64 (sets floor zone +1's footstep step to +2; handler 0x42BE92)
 - **Opcode 0x23** (32 bytes): Places a mesh section into a model slot at a world position with rotation and render mode. Verified against `sub_426806` in DINO.exe; the opcode dispatch table starts at VA `0x006576A0` (the two words before it are 0 and 1)
-- **Opcode 0x28** (size by type): a zone's four XZ corners at +4..+19; a real zone repeats its type at +20 and has 1 at +23, which no other 0x28 byte in the scripts does
-- **Opcode 0x28 type 4** (44 bytes): Item pickup zone. Its model (slot at +34, section at +36) is placed on the floor at the zone centre (`sub_426DFC` → `sub_448E3B`) and spins while the item is there
+- **Opcode 0x28** (size by action): a zone's four XZ corners are at +4..+19; the record length follows the type byte. The type selects the native action, and the overlay tree shows each with a confidence:
+
+| Action | Name | Confidence |
+|---|---|---|
+| 0 | Door / room transition | confirmed |
+| 1 | Script-run interaction (handler runs a behaviour script) | derived |
+| 2 | Set flag on entry | confirmed |
+| 3 | Run event subroutine | confirmed |
+| 4 | Item pickup | confirmed |
+| 5 | Player byte + sound: +0x1C is copied to a player byte, +0x1D is a sound effect (used by no room) | derived |
+| 6 | Directional player reaction, no fields (used by no room) | derived |
+| 7 | Script + set-flag interaction (as 1, and conditionally sets a flag byte of the slot) | derived |
+| 8 | Emergency box: box id +0x1C (0-7 red, 8-12 green, 13-16 yellow), plug cost +0x1D | confirmed |
+| 9 | No-op (used by no room) | confirmed |
+| 10 | Fingerprint-taking spot: using the F.C. device (item 0x41) here makes it 0x42; print id +0x1C (1-4) | confirmed |
+| 11 | Laser-fence keypad | confirmed |
+
+  8 and 10 are confirmed from their handlers (English DINO.exe); 5, 6, 9 are used by no room. Any other type shows as Unknown action with its raw tail
+- **Action versus behavior**: The action says which native handler runs. It does not by itself name the room-specific purpose. For action 3, RaptorScope scans the target subroutine and the subroutines it starts as tasks (0x01), jumps to (0x05) or calls (0x0F), and reports proven signatures such as DDK (`0x58` screen type 3), cutscene (`flag(2,2)` bracket), encounter (enemy placement, named by species: `encounter (Velociraptor)`), item event (item AOT), or another native interface; otherwise it stays `Scripted event -> sub N`. A 0x20 that places the human rig (category 1: Rick, Gail, Tom, corpses) is not an encounter. Compound results such as `Cutscene + encounter (Tyrannosaurus)` are preserved
+- **Activation provenance**: A selected AOT shows whether its record is installed during room initialization or by another subroutine, and whether that owner is targeted by another event, together with its source offset, owner, raw length/payload, target, evidence basis, and confidence. Same-coordinate records are retained when their owners or payloads differ. Across the six regional builds, ST304 is the maximum at 57 raw records and 44 after byte-identical/same-owner deduplication, within the 64-zone capacity
+- **Opcode 0x28 type 4** (44 bytes): Item pickup zone. Its model (slot at +34, section at +36) is placed on the floor at the zone centre (`sub_426DFC` → `sub_448E3B`) and spins while the item is there. The overlay names the item (`item 0x69 DDK Code Disc H x1`); id 0xFF is a slot the script fills at run time
 - **Opcode 0x5B** (44 bytes): Enemy spawn for a dinosaur that follows the player through a door. The game keeps up to 10 dinosaurs in a table that records which room each is in; a 0x5B record in room R spawns the one left in room +0x14 if it was close enough to the player (+0x16) and passes the chance roll (+0x15) and the room's live-dinosaur cap. With +0x19 = 0 it plays a cinematic: it waits for camera +0x1A, cuts the camera to +0x1C/+0x24 and runs subroutine +0x1B; otherwise it simply appears. The overlay tree shows each spawn's source room and whether it is cinematic or plain (per DinoRand STATIC-SCD-RE cont.103). A cutscene can spawn its enemy off stage and move it in later: ST100's raptor is spawned at x = z = 0x7000 and appears where the cutscene moves it, (2024, 0, 3008). Every other spawn lies within ±15104, so the overlay shows a spawn beyond ±20000 where its thread first moves it on stage
+- **ST30C regional regression**: The Japanese and English rooms contain two temporary action-2 flag checkpoints installed by subroutine 13. French, German, Italian, and Spanish omit both records; they must not be mislabeled as item requirements or deduplicated into another zone
 - **Work target**: 0x22 03 `<slot>` selects a model slot and 0x22 02 `<slot>` a character (the entry that 0x20 or 0x5B filled); 0x2A sets one of its fields (3/4/5 = x/y/z, 6/7/8 = rotation, via `sub_47416C`), 0x36 sets x/y/z and 0x37 the rotation
-- **Control flow**: 0x0C (unconditional jump), 0x0E (conditional relative jump on the last test result), 0x0F (gosub: pushes pc+4 and jumps) and 0x10 (return), 0x05 (jump to another event subroutine), 0x04 (end of thread; every thread finishes with `04 00 00 00`). 0x01 and 0x0A are 4-byte opcodes that scripts continue past; decoding each script straight through with the opcode sizes lands exactly on the next script in every room. Message text follows the last thread in the same block
+- **Control flow**: 0x0C (unconditional jump), 0x0E (conditional relative jump on the last test result), 0x0F (gosub: pushes pc+4 and jumps) and 0x10 (return, 2 bytes, as is 0x11), 0x05 (jump to another event subroutine), 0x04 (end of thread; every thread finishes with `04 00 00 00`). 0x01 starts a subroutine as a parallel task (`01 <s8 task> <s16 sub>`, task -1 allocates one; handler `0x4A3103`), shown as `TASK_START`. 0x0A is a 4-byte opcode that scripts continue past; decoding each script straight through with the opcode sizes lands exactly on the next script in every room. Opcode bytes from 0x72 up are not opcodes (the VM dispatch covers 0x00-0x71), and the SCD panel prints `UNK_xx` and stops there. Message text follows the last thread in the same block
 - **Exe build**: the DINO.exe addresses in this document and in the source come from a different build than the GOG "Classic REbirth" exe. In that exe, code in 0x422000-0x42BE92 sits 0x160 lower (the 0x5B handler, 0x42A80D in the GOG exe, is 0x42A96D in the other build), and the data addresses do not carry over
 
 ### Dino Crisis 2
