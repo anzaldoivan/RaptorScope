@@ -16,7 +16,7 @@ enum DatEntryType {
     DAT_PALETTE = 2,  /* BGR555 CLUT (256 colors x h rows)    */
     DAT_SNDH    = 3,  /* Gian VAG sound header (PS1 audio)    */
     DAT_SNDB    = 4,  /* VAG sound body                       */
-    DAT_SNDE    = 5,  /* SEQ music sequence (MIDI)            */
+    DAT_SNDE    = 5,  /* sequence-like sound data, not SEQ   */
     DAT_UNK6    = 6,  /* Unknown                              */
     DAT_LZSS0   = 7,  /* LZSS compressed (models, bgs, room)  */
     DAT_LZSS1   = 8,  /* LZSS compressed 8bpp texture         */

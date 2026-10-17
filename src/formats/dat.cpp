@@ -24,7 +24,7 @@ static const char* s_type_descs[] = {
     "BGR555 CLUT (256 colors x h rows)",
     "Gian VAG sound header (PS1 audio)",
     "VAG sound body",
-    "SEQ music sequence (MIDI)",
+    "Sequence-like sound data (not SEQ)",
     "Unknown",
     "LZSS compressed (models, backgrounds, room data)",
     "LZSS compressed 8bpp texture",

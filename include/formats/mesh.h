@@ -351,7 +351,7 @@ struct RdtCollisionRect {
 struct RdtCameraEntry {
     s16 eye_x, eye_y, eye_z;       /* camera eye position */
     s16 tgt_x, tgt_y, tgt_z;       /* camera target position */
-    u16 fov;
+    u16 eye_mode;                  /* 0x4C +8: 0 = cut, else move (0x421F97) */
     u16 flags;
 };
 
@@ -395,7 +395,7 @@ struct RdtObjectSpawn {
     s16 rot_y;
 };
 
-/*─── SCD opcode 0x5B: enemy spawn (44B) ──────────────────────*/
+/*─── SCD opcode 0x5B: dinosaur follows the player in (44B) ───*/
 struct RdtItemSpawn {
     u8  slot;
     u8  type;
@@ -404,6 +404,8 @@ struct RdtItemSpawn {
     s16 rot_y;
     u32 mesh_ptr;
     u32 anim_ptr;
+    u8  src_room;   /* +0x14: the room the following dinosaur comes from */
+    u8  plain;      /* +0x19 non-zero: spawned with no cinematic */
 };
 
 /*─── SCD opcode 0x20: EMD character placement ──────────────────*/
@@ -418,7 +420,7 @@ struct RdtCharPlace {
     u32 anim_ptr;
 };
 
-/*─── SCD opcode 0x3A: scene light source (12B) ────────────────*/
+/*─── Scene light source (ptr[0]; not opcode 0x3A) ──────────────*/
 struct RdtSceneLight {
     u8  slot;
     s16 px, py, pz;           /* world-space position */

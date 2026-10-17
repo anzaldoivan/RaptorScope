@@ -592,7 +592,7 @@ bool App::open_archive(const char* path) {
                         static const CharName char_names[] = {
                             {"P00","Regina (main)"}, {"P01","Regina (alt)"},
                             {"P10","Regina Costume A"}, {"P20","Regina Costume B"}, {"P30","Regina Costume C"},
-                            {"P40","T-Rex Boss"},
+                            {"P40","Human type (P40)"},
                             {"E00","Raptor"}, {"E01","Raptor (alt)"}, {"E10","T-Rex"},
                             {"E11","T-Rex (alt)"}, {"E20","Pteranodon"}, {"E40","Therizinosaurus"},
                             {"E50","Compsognathus"},

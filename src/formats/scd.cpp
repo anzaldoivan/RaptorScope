@@ -126,10 +126,10 @@ static void fmt_operands(char* buf, size_t bufsz, u8 op, const u8* data, int len
     case 0x37: /* WORK_ROT */
         _snprintf(buf, bufsz, "rx=%d, ry=%d, rz=%d", rs16(data+2), rs16(data+4), rs16(data+6));
         return;
-    case 0x3A: /* LIGHT_SET */
-        _snprintf(buf, bufsz, "type=%d, x=%d, y=%d, z=%d, r=%d, g=%d, b=%d",
-                  data[1], rs16(data+2), rs16(data+4), rs16(data+6),
-                  data[8], data[9], data[10]);
+    case 0x3A: /* BEHAV_SET: installs a behaviour on the bound character; not a
+                  light (byte 1 is always 0, byte 2 is 1-15) */
+        _snprintf(buf, bufsz, "behaviour=%d, 0x%04X, 0x%04X, 0x%04X",
+                  data[2], (u16)rs16(data+4), (u16)rs16(data+6), (u16)rs16(data+8));
         return;
     case 0x42: /* OBJ_SET */
         _snprintf(buf, bufsz, "id=%d, type=%d, x=%d, y=%d, z=%d",
@@ -143,16 +143,22 @@ static void fmt_operands(char* buf, size_t bufsz, u8 op, const u8* data, int len
                   data[1], ex, ey, ez, tx, ty, tz, rs16(data+8), rs16(data+24));
         return;
     }
-    case 0x59: /* CHAR_PLACE */
+    case 0x59: /* CHAR_PLACE: +0x10 is the room's own index (DinoRand cont.104) */
         if (len >= 20) {
-            _snprintf(buf, bufsz, "category=%d, model=0x%08X, motion=0x%08X, index=%d",
+            _snprintf(buf, bufsz, "category=%d, model=0x%08X, motion=0x%08X, room=%d",
                       data[2], rd32(data+4), rd32(data+8), data[0x10]);
         }
         return;
-    case 0x5B: { /* EM_SET */
-        if (len >= 16) {
-            _snprintf(buf, bufsz, "slot=%d, type=%d, x=%d, y=%d, z=%d, model=0x%08X",
-                      data[1], data[2], rs16(data+4), rs16(data+6), rs16(data+8), rd32(data+12));
+    case 0x5B: { /* EM_SET: a dinosaur that was near the player in room +0x14
+                    follows them in (handler 0x42A80D in the GOG exe; DinoRand
+                    STATIC-SCD-RE cont.103) */
+        if (len >= 44) {
+            _snprintf(buf, bufsz, "slot=%d, type=%d, x=%d, y=%d, z=%d, model=0x%08X, from room %d, "
+                      "chance=%d, distance=%d, %s, camera=%d, sub=%d, cam=(%d,%d,%d), tgt=(%d,%d,%d)",
+                      data[1], data[2], rs16(data+4), rs16(data+6), rs16(data+8), rd32(data+12),
+                      data[0x14], data[0x15], (u16)rs16(data+0x16), data[0x19] ? "plain" : "cinematic",
+                      data[0x1A], data[0x1B], rs16(data+0x1C), rs16(data+0x1E), rs16(data+0x20),
+                      rs16(data+0x24), rs16(data+0x26), rs16(data+0x28));
         }
         return;
     }

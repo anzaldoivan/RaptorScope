@@ -3087,7 +3087,8 @@ static int scan_trigger_zones(const u8* dec, size_t scd_base, size_t scd_end,
     return added;
 }
 
-/* Enemy spawns (0x5B, 44 bytes).  The handler (0x42A96D) puts a character
+/* Enemy spawns (0x5B, 44 bytes).  The handler (0x42A80D in the GOG exe,
+   0x42A96D in the other build, C13) puts a character
    into the same 0x260-byte character table as 0x20: byte[1] = character
    slot, byte[2] = type (+0x27), byte[3] (+0x2F), position at +4/+6/+8,
    rotation at +10, model and animation pointers at +12/+16; the game
@@ -3176,6 +3177,8 @@ static int scan_enemy_spawns(const u8* dec, size_t scd_base, size_t scd_end, u32
         is.rot_y    = rd_s16(dec + pc + 10);
         is.mesh_ptr = m;
         is.anim_ptr = a;
+        is.src_room = dec[pc + 0x14];
+        is.plain    = dec[pc + 0x19] != 0;
         if (!spawn_on_stage(is.px, is.pz) &&
             !enemy_spawn_entrance(dec + scd_base, scd_end - scd_base, pc - scd_base, is))
             continue;
@@ -3590,7 +3593,10 @@ bool parse_rdt_overlay(const u8* dec, size_t dec_size, u32 base_addr,
                     cam.tgt_x = rd_s16(dec + pc + 18);
                     cam.tgt_y = rd_s16(dec + pc + 20);
                     cam.tgt_z = rd_s16(dec + pc + 22);
-                    cam.fov   = (u16)rd_s16(dec + pc + 8);
+                    /* +8 is the eye's transition mode, the first argument of the
+                       eye setter (0x421F97 in the GOG exe): 0 cuts, anything
+                       else moves toward the new eye.  Not a field of view. */
+                    cam.eye_mode = (u16)rd_s16(dec + pc + 8);
                     cam.flags = 0;
                     if (add_camera(ov, cam)) found++;
                 }
@@ -3608,49 +3614,15 @@ bool parse_rdt_overlay(const u8* dec, size_t dec_size, u32 base_addr,
                     cam.tgt_x = rd_s16(dec + pc + 8);
                     cam.tgt_y = rd_s16(dec + pc + 10);
                     cam.tgt_z = rd_s16(dec + pc + 12);
-                    cam.fov   = 0;
+                    cam.eye_mode = 0;
                     cam.flags = 0;
                     if (add_camera(ov, cam)) found++;
                 }
 
-                /* 0x3A: Scene light source (12 bytes)
-                   byte[1]=slot, byte[2]=subtype (0=position, 1=color)
-                   type 0: s16 X,Y,Z at bytes [4],[6],[8]
-                   type 1: u8 R,G,B at bytes [4],[6],[8] */
-                if (op == 0x3A && pc + 12 <= dec_size) {
-                    u8 slot = dec[pc + 1];
-                    u8 subtype = dec[pc + 2];
-                    if (slot < 8 && (subtype == 0 || subtype == 1)) {
-                        /* Find or create light entry for this slot */
-                        int li = -1;
-                        for (int d = 0; d < ov.n_lights; d++)
-                            if (ov.lights[d].slot == slot) { li = d; break; }
-                        if (li < 0 && ov.n_lights < 8) {
-                            li = ov.n_lights++;
-                            RdtSceneLight& l = ov.lights[li];
-                            l.slot = slot;
-                            l.px = l.py = l.pz = 0;
-                            l.radius = 800;
-                            l.r = l.g = l.b = 200;
-                            l.has_pos = 0; l.has_color = 0;
-                        }
-                        if (li >= 0) {
-                            RdtSceneLight& l = ov.lights[li];
-                            if (subtype == 0) {
-                                l.px = rd_s16(dec + pc + 4);
-                                l.py = rd_s16(dec + pc + 6);
-                                l.pz = rd_s16(dec + pc + 8);
-                                l.has_pos = 1;
-                            } else {
-                                l.r = dec[pc + 4];
-                                l.g = dec[pc + 6];
-                                l.b = dec[pc + 8];
-                                l.has_color = 1;
-                            }
-                            found++;
-                        }
-                    }
-                }
+                /* 0x3A is not a light: across the 637 uses in the 148 rooms byte 1
+                   is always 0 and byte 2 is 1-15, and the handler installs a
+                   behaviour on the bound character.  Room lights come from ptr[0]
+                   only. */
 
                 /* 0x5B enemy spawns are found by scan_enemy_spawns */
 

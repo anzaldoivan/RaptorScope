@@ -2602,7 +2602,7 @@ static void ov_draw_camcut(const RdtSceneOverlay& ov, int i) {
     if (s_ov_hl) ov_pin((x0 + x1) * 0.5f, cy, (z0 + z1) * 0.5f);
 }
 
-/* Scene lights (0x3A): colored octahedron wireframes */
+/* Scene lights (ptr[0]): colored octahedron wireframes */
 static void ov_draw_light(const RdtSceneOverlay& ov, int i) {
     const RdtSceneLight& li = ov.lights[i];
     if (!li.has_pos) return;
@@ -2644,7 +2644,7 @@ static void ov_draw_light(const RdtSceneOverlay& ov, int i) {
     if (s_ov_hl) ov_pin(x, y, z);
 }
 
-/* Enemy spawns (0x5B): red X on a circle with a post */
+/* Enemy spawns (0x5B, a dinosaur following the player in): red X on a circle with a post */
 static void ov_draw_enemy(const RdtSceneOverlay& ov, int i) {
     ov_width(3.0f);
     ov_color(1.0f, 0.15f, 0.1f);  /* red */
@@ -3450,7 +3450,7 @@ void ViewerPanel3D::set_overlay(const RdtSceneOverlay& overlay) {
     for (int i = 0; i < n_walk_chars; i++) walk_chars[i] = overlay.chars[i];
     n_walk_spawns = (overlay.n_spawns < 64) ? overlay.n_spawns : 64;
     for (int i = 0; i < n_walk_spawns; i++) walk_spawns[i] = overlay.spawns[i];
-    /* Cache scene lights from SCD 0x3A */
+    /* Cache scene lights (ptr[0]) */
     n_room_lights = (overlay.n_lights < 8) ? overlay.n_lights : 8;
     for (int i = 0; i < n_room_lights; i++) room_lights[i] = overlay.lights[i];
     room_ambient[0] = overlay.ambient_r;
@@ -3524,7 +3524,7 @@ void ViewerPanel3D::fill_ov_tree() {
     static const char* names_dc1[OverlayVis::N_TYPES] = {
         "Cameras", "Script cameras (0x4C/0x2E)", "Camera cut zones", "Trigger zones (0x28)",
         "Floor zones", "Collision rects", "Enemy spawns (0x5B)", "Characters (0x20)",
-        "Objects (0x42)", "Object spawns", "Lights (0x3A)", "Fog (0x3D)",
+        "Objects (0x42)", "Object spawns", "Lights (ptr[0])", "Fog (0x3D)",
     };
     /* A Dino Crisis 2 room fills the same lists from its own sections and
        opcodes (dc2_room_overlay) */
@@ -3623,8 +3623,9 @@ void ViewerPanel3D::fill_ov_tree() {
         case OverlayVis::ENEMIES:
             for (int i = 0; i < ov.n_items; i++) {
                 const RdtItemSpawn& e = ov.items[i];
-                _snprintf(buf, sizeof(buf) - 1, "Slot %d  type %d  (%d, %d, %d)  %d\xB0", e.slot, e.type,
-                          e.px, e.py, e.pz, ((e.rot_y & 0xFFF) * 360 + 2048) / 4096 % 360);
+                _snprintf(buf, sizeof(buf) - 1, "Slot %d  type %d  (%d, %d, %d)  %d\xB0  from room %d, %s",
+                          e.slot, e.type, e.px, e.py, e.pz, ((e.rot_y & 0xFFF) * 360 + 2048) / 4096 % 360,
+                          e.src_room, e.plain ? "plain" : "cinematic");
                 OV_ITEM(i);
             }
             break;
@@ -4344,7 +4345,7 @@ void ViewerPanel3D::render() {
     /* Update lights — skip on VM/software (lighting disabled) */
     if (!sw_renderer && !in_vm) {
         if (use_room_lights && n_room_lights > 0) {
-            /* ── Room lights from SCD 0x3A: positional in world space ── */
+            /* ── Room lights from ptr[0]: positional in world space ── */
             /* Disable default lights first */
             glDisable(GL_LIGHT0); glDisable(GL_LIGHT1); glDisable(GL_LIGHT2);
 
@@ -4934,7 +4935,7 @@ void ViewerPanel3D::render() {
             { 0.8f, 0.3f, 0.8f, OverlayVis::TRIGGERS, 5,     "Purple = Zone, other type (0x28)" },
             { 1.0f, 1.0f, 0.0f, OverlayVis::FLOOR_ZONES, -1, "Yellow = Floor zone" },
             { 0.6f, 0.3f, 0.85f,OverlayVis::CAM_CUTS, -1,    "Violet = Camera cut zone" },
-            { 0.9f, 0.85f, 0.5f,OverlayVis::LIGHTS, -1,      "Gold   = Scene light (0x3A)" },
+            { 0.9f, 0.85f, 0.5f,OverlayVis::LIGHTS, -1,      "Gold   = Scene light (ptr[0])" },
             { 0.2f, 0.4f, 1.0f, OverlayVis::SCRIPT_CAMS, -1, "Blue   = Script camera eye" },
             { 1.0f, 0.2f, 0.2f, OverlayVis::SCRIPT_CAMS, -1, "Red pt = Script camera target" },
             { 1.0f, 0.3f, 1.0f, OverlayVis::SPAWNS, -1,      "Pink   = Object spawn" },
